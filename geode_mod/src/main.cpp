@@ -7,6 +7,8 @@
 #endif
 
 #include <Geode/Geode.hpp>
+#include <Geode/binding/EndLevelLayer.hpp>
+#include <Geode/binding/GJDropDownLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <matjson.hpp>
@@ -642,6 +644,45 @@ void applyInputEvent(PlayLayer* layer, bool down, bool player2) {
     }
 }
 
+bool isCompletionOverlay(cocos2d::CCNode* node) {
+    return typeinfo_cast<EndLevelLayer*>(node) || typeinfo_cast<GJDropDownLayer*>(node);
+}
+
+int removeCompletionOverlays(cocos2d::CCNode* node) {
+    if (!node) {
+        return 0;
+    }
+
+    auto removed = 0;
+    auto* children = node->getChildren();
+    if (!children) {
+        return removed;
+    }
+
+    std::vector<cocos2d::CCNode*> nodesToRemove;
+    for (auto* child : geode::cocos::CCArrayExt<cocos2d::CCNode*>(children)) {
+        if (!child) {
+            continue;
+        }
+        if (isCompletionOverlay(child)) {
+            nodesToRemove.push_back(child);
+            continue;
+        }
+        removed += removeCompletionOverlays(child);
+    }
+
+    for (auto* child : nodesToRemove) {
+        child->removeFromParentAndCleanup(true);
+        removed += 1;
+    }
+    return removed;
+}
+
+int clearEndLevelUi() {
+    auto* scene = cocos2d::CCDirector::sharedDirector()->getRunningScene();
+    return removeCompletionOverlays(scene);
+}
+
 void applyBridgeCommands(PlayLayer* layer) {
     auto commands = bridgeServer().takeCommands();
     if (commands.empty()) {
@@ -663,7 +704,18 @@ void applyBridgeCommands(PlayLayer* layer) {
         if (command.kind == BridgeCommandKind::Reset) {
             state.p1Down = false;
             state.p2Down = false;
+            auto removedEndLayers = clearEndLevelUi();
             layer->fullReset();
+            removedEndLayers += clearEndLevelUi();
+            if (removedEndLayers > 0) {
+                bridgeServer().enqueueObservation(makeDiagnosticMessage(
+                    "end_level_ui_removed",
+                    state.nextObservationTick,
+                    matjson::makeObject({
+                        { "removed_count", removedEndLayers },
+                    })
+                ));
+            }
             resetAttemptState(layer);
             continue;
         }

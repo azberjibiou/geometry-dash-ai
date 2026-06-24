@@ -260,6 +260,12 @@ def write_bmp(path: str | Path, frame: CapturedFrame) -> None:
 def find_window_region(title_substring: str) -> CaptureRegion:
     """Return the screen region for the first visible window matching a title."""
 
+    return find_window(title_substring).region
+
+
+def find_window(title_substring: str) -> VisibleWindow:
+    """Return the first visible window matching a title substring."""
+
     matching_windows = [
         window
         for window in list_visible_windows()
@@ -267,7 +273,48 @@ def find_window_region(title_substring: str) -> CaptureRegion:
     ]
     if not matching_windows:
         raise ScreenCaptureError(f"no visible window title contains {title_substring!r}")
-    return matching_windows[0].region
+    return matching_windows[0]
+
+
+def foreground_window() -> VisibleWindow | None:
+    """Return the current foreground window, if it has a title and bounds."""
+
+    _require_windows()
+    user32 = _load_user32()
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+
+    title = _window_title(user32, hwnd)
+    if not title:
+        return None
+    try:
+        region = _window_region(hwnd)
+    except ScreenCaptureError:
+        return None
+    return VisibleWindow(hwnd=int(hwnd), title=title, region=region)
+
+
+def foreground_window_matches(title_substring: str) -> bool:
+    """Return whether the foreground window title contains a substring."""
+
+    window = foreground_window()
+    if window is None:
+        return False
+    return title_substring.lower() in window.title.lower()
+
+
+def activate_window(title_substring: str) -> VisibleWindow:
+    """Try to bring a visible matching window to the foreground."""
+
+    _require_windows()
+    window = find_window(title_substring)
+    user32 = _load_user32()
+    hwnd = wintypes.HWND(window.hwnd)
+    user32.ShowWindow(hwnd, _SW_RESTORE)
+    user32.BringWindowToTop(hwnd)
+    user32.SetForegroundWindow(hwnd)
+    return window
 
 
 def list_visible_windows() -> list[VisibleWindow]:
@@ -293,14 +340,7 @@ def _collect_window(
     if not user32.IsWindowVisible(hwnd):
         return True
 
-    title_length = user32.GetWindowTextLengthW(hwnd)
-    if title_length <= 0:
-        return True
-    buffer = ctypes.create_unicode_buffer(title_length + 1)
-    copied = user32.GetWindowTextW(hwnd, buffer, title_length + 1)
-    if copied <= 0:
-        return True
-    title = buffer.value.strip()
+    title = _window_title(user32, hwnd)
     if not title:
         return True
 
@@ -346,10 +386,24 @@ def _last_windows_error(operation: str) -> ScreenCaptureError:
     return ScreenCaptureError(f"{operation} failed with Windows error {error_code}")
 
 
+def _window_title(user32: ctypes.WinDLL, hwnd: int) -> str | None:
+    title_length = user32.GetWindowTextLengthW(hwnd)
+    if title_length <= 0:
+        return None
+    buffer = ctypes.create_unicode_buffer(title_length + 1)
+    copied = user32.GetWindowTextW(hwnd, buffer, title_length + 1)
+    if copied <= 0:
+        return None
+    title = buffer.value.strip()
+    return title or None
+
+
 def _load_user32() -> ctypes.WinDLL:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.EnumWindows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
     user32.EnumWindows.restype = wintypes.BOOL
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
     user32.GetDC.argtypes = [wintypes.HWND]
     user32.GetDC.restype = wintypes.HDC
     user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
@@ -366,6 +420,12 @@ def _load_user32() -> ctypes.WinDLL:
     user32.GetWindowTextW.restype = ctypes.c_int
     user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(_RECT)]
     user32.GetWindowRect.restype = wintypes.BOOL
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.BringWindowToTop.argtypes = [wintypes.HWND]
+    user32.BringWindowToTop.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
     return user32
 
 
@@ -433,6 +493,7 @@ _SRCCOPY = 0x00CC0020
 _DIB_RGB_COLORS = 0
 _BI_RGB = 0
 _DWMWA_EXTENDED_FRAME_BOUNDS = 9
+_SW_RESTORE = 9
 
 
 class _RECT(ctypes.Structure):
