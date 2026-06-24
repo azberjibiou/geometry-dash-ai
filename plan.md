@@ -1345,6 +1345,15 @@ Trace and Macro Format
 
 Phase 3:
 Minimal Geometry Dash Bridge
+
+Phase 4:
+Deterministic Replay Check
+
+Phase 5:
+Screenshot Observation
+
+Phase 6:
+Scripted Policy + Human Wrapper End-to-End
 ```
 
 Live smoke-test result:
@@ -1366,16 +1375,16 @@ The local smoke trace is intentionally ignored by Git through `artifacts/`.
 Current local target:
 
 ```text
-Phase 4:
-Deterministic Replay Check
+Phase 7:
+Imitation Learning on One Level
 ```
 
 Reason:
 
-Before adding screenshots, policy learning, or practice memory, verify that the
-real Geometry Dash bridge gives stable outcomes for repeated identical macros.
-If identical input events do not replay consistently under fixed settings, the
-learning loop will be hard to trust.
+The non-neural Phase 6 pipeline now works end-to-end with centered timing
+noise, queued live Geode replay, and profile-sensitive summaries. The next
+milestone is to train a small policy to imitate one short level from aligned
+frame/progress/input data.
 
 Phase 4 implementation:
 
@@ -1645,74 +1654,221 @@ Interpretation:
   percent variance.
 ```
 
+Latest Phase 5 validation update:
+
+```text
+Screenshot observation capture is implemented and pushed.
+
+Current pushed commit:
+  87e5985 Add guarded Geode frame capture controls
+
+Implemented:
+  gd_capture/screen_capture.py
+    Windows window capture helpers, foreground checks, and window activation
+
+  scripts/capture_geode_frames.py
+    manual Geode frame capture runner with:
+    - queued macro replay through --macro-json
+    - capture stride and start tick controls
+    - start/progress guards for wrong-level protection
+    - foreground/window guards for visible gameplay capture
+    - stop-before-completion and stop-on-success controls
+    - manifest JSONL and summary JSON output
+    - lightweight image validation
+
+  geode_mod/src/main.cpp
+    reset path clears stale completion/dropdown overlays before and after reset
+    so frame datasets do not start under the LEVEL COMPLETE dialog
+
+  tests/test_capture_geode_frames.py
+    synthetic tests for guard and terminal-capture behavior
+
+Verification:
+  pytest: 61 passed
+  Geode CMake build: succeeded and installed updated .geode package
+
+Live capture:
+  artifact: artifacts/frame_capture_20260625_011230
+  macro: examples/macros/simple_clear.json
+  local/offline tiny clear level
+  frames: 140
+  validation_ok: true
+  start saved frame: tick 5, about 0.82%
+  final saved frame: tick 700, about 96.03% telemetry
+  sampled frames: gameplay-only, no LEVEL COMPLETE popup
+
+Interpretation:
+  Phase 5 is complete enough to proceed. Python can collect visible Geometry
+  Dash gameplay frames aligned with bridge metadata and can reject common bad
+  captures such as the wrong level, covered windows, or stale completion UI.
+```
+
+Latest Phase 6 validation update:
+
+```text
+Scripted policy + human wrapper end-to-end is implemented.
+
+Implemented:
+  gd_human_model/motor_noise.py
+    HumanizedEventResult exposes per-event provenance:
+    - timing std
+    - miss probability
+    - sampled timing error
+    - raw tick
+    - actual tick
+    - drop reason
+
+  gd_human_model/macro_humanizer.py
+    reusable intended-macro to actual-macro adapter
+    stores intended events, decision events, actual events, and per-event deltas
+    supports deterministic output for a fixed seed
+
+  gd_trace/humanized_run.py
+    repeated-attempt summaries:
+    - clears and clear_rate
+    - average_progress and best_percent
+    - final_percent_by_attempt
+    - death tick/percent histograms
+    - missed event counts
+    - actual timing delta distributions
+
+  scripts/run_humanized_geode_macro.py
+    manual live Geode runner:
+    - loads an intended macro JSON
+    - selects a built-in HumanProfile or profile JSON
+    - generates one actual macro per attempt
+    - uses queued Geode replay
+    - saves ignored artifacts under artifacts/
+    - writes per-attempt traces, actual macros, humanization JSON, and summary.json
+    - supports --post-terminal-delay-seconds to avoid stale completion states
+
+  tests/
+    test_macro_humanizer.py
+    test_humanized_run.py
+    test_run_humanized_geode_macro.py
+
+Important correction:
+  Macro humanization now distinguishes timing references:
+
+  target:
+    macro ticks are desired click timings.
+    actual clicks are centered on those ticks, with jitter/misses around them.
+    This is the default for recorded or scripted target macros.
+
+  decision:
+    macro ticks are AI/policy decision timings.
+    visual and motor delay shift actual clicks later.
+    This remains available for future policy-decision simulations.
+
+Reason for correction:
+  The first Phase 6 adapter treated macro ticks as decision ticks, which biased
+  every profile late by visual_delay_frames + motor_delay_frames. That made
+  Intermediate and Beginner always click late instead of clicking early/late
+  around the intended timing. The default target mode fixes this.
+
+Verification:
+  pytest: 76 passed
+
+Live validation:
+  level:
+    local/offline triple-spike test level
+
+  raw centered macro:
+    press 192, release 212
+    result: clear
+
+  corrected target-mode profile sweep:
+    intended press: 192
+    intended release: 212
+    attempts per profile: 10
+
+    TopPlayer:
+      clears: 10/10
+      timing_mean_frames: 0.00
+      timing_std_frames: 0.71
+
+    Advanced:
+      clears: 10/10
+      timing_mean_frames: -0.10
+      timing_std_frames: 1.37
+
+    Intermediate:
+      clears: 10/10
+      timing_mean_frames: 0.05
+      timing_std_frames: 2.78
+
+    Beginner:
+      clears: 9/10
+      timing_mean_frames: -0.10
+      timing_std_frames: 4.49
+      deaths: tick 206 once
+
+Interpretation:
+  Phase 6 is complete enough to proceed. The same intended macro now produces
+  centered timing noise for every profile, while larger timing variance lowers
+  consistency on the timing-sensitive triple-spike fixture.
+
+  The current Beginner profile represents a practiced player with noisy motor
+  execution, not a first-time sight-reading beginner. Later calibration should
+  split profiles such as PracticedBeginner and UnpracticedBeginner.
+```
+
 Next target:
 
 ```text
-Phase 5:
-Screenshot Observation
+Phase 7:
+Imitation Learning on One Level
 
 Decision:
-Phase 4 is good enough to proceed. The bridge now has stable mod-side input
-replay, deterministic death validation, and stable simple-clear outcome
-validation. The remaining simple-clear position spread is small, bounded, and
-near end-of-level behavior, so it should not block the first screenshot
-observation spike.
+Now that replay, trace metadata, visual frame capture, and the non-neural
+humanized macro pipeline are stable enough, start the first small imitation
+learning spike on one local/offline level.
+Do not implement practice memory yet.
 
-Do not start neural-network training yet.
-
-Immediate Phase 5 goal:
-prove that Python can capture usable Geometry Dash frames and align each frame
-with the latest bridge observation tick.
+Immediate Phase 7 goal:
+train a simple policy to imitate a recorded playthrough on one short local
+level using aligned frame/progress/input data.
 
 Initial implementation plan:
-1. Add a small Windows screen/window capture module.
-   - Prefer a dependency-light approach if practical.
-   - Support an explicit window title and/or manual capture region.
-   - Keep Geometry Dash windowed, visible, and unobstructed for live checks.
+1. Create or choose a small dataset fixture.
+   - Use local/offline levels only.
+   - Use screenshot frames already supported by Phase 5.
+   - Use macro/input events aligned to bridge ticks.
+   - Keep generated frames, traces, and datasets under ignored artifacts/.
 
-2. Add a manual capture script.
-   Suggested shape:
-     scripts/capture_geode_frames.py
+2. Add dataset preparation utilities.
+   - load frame manifests and trace rows
+   - align frames, progress, input_down, and event labels
+   - produce train/validation splits for one short level
 
-   It should:
-   - connect to the existing Geode bridge,
-   - receive observations,
-   - capture one frame per selected observation or at a configured stride,
-   - save ignored artifacts under artifacts/frame_capture_<timestamp>/,
-   - write a manifest JSONL mapping frame file to observation metadata.
+3. Add a minimal imitation policy.
+   Initial input:
+   - last 4 grayscale frames
+   - progress
+   - current input_down
 
-3. Manifest fields should include at minimum:
-   - frame_path
-   - tick
-   - time_ms
-   - percent
-   - x
-   - y
-   - mode
-   - gravity
-   - input_down
-   - dead
-   - capture_width
-   - capture_height
-   - capture_region or window title metadata
+   Initial output:
+   - press_event probability
+   - release_event probability
 
-4. Add validation for captured frames.
-   The first validator can be simple:
-   - frame files exist,
-   - dimensions match the manifest,
-   - frames are not blank,
-   - basic brightness/variance/hash values change over time,
-   - ticks are non-decreasing,
-   - observations and frames have a clear one-to-one or documented stride.
+4. Handle label shifting carefully.
+   For policy training, frame at tick t should learn events needed around
+   t + total_delay_frames when simulating perception and motor delay.
 
-5. Keep live checks manual and local/offline only.
-   - Do not submit online leaderboard runs.
-   - Do not commit generated images, traces, or artifacts.
+5. Add synthetic/unit tests first.
+   - event label alignment
+   - delayed-label shifting
+   - dataset windowing
+   - deterministic train/validation split
 
-Phase 5 success criterion:
-Python can collect a small local/offline run containing aligned visual frames
-and bridge metadata, and the saved frames are visibly usable for later
-imitation-learning labels.
+6. Run a small live/manual replay check.
+   The learned policy does not need zero-shot generalization yet. It only needs
+   to reproduce meaningful progress on the same short level.
+
+Phase 7 success criterion:
+The learned policy can reproduce meaningful progress on one practiced local
+level, using aligned visual/progress/input observations, without adding
+practice memory yet.
 ```
 
 ---
@@ -1722,82 +1878,67 @@ imitation-learning labels.
 Copy this into the next Codex chat:
 
 ```text
-We are in the geometry_dash_ai repo. Please continue from plan.md at Phase 5:
-Screenshot Observation.
+We are in the geometry_dash_ai repo. Please continue from plan.md at Phase 7:
+Imitation Learning on One Level.
 
 Current status:
-- Phase 1, Phase 2, Phase 3, and Phase 4 are implemented.
-- Current pushed commit: 6dfc9ed Add simple clear replay fixture
+- Phase 1 through Phase 6 are implemented.
+- Phase 6 added target-centered humanized macro replay through the live Geode
+  bridge.
 - The Geode mod builds successfully with:
   C:\Program Files\CMake\bin\cmake.exe
 - The replay script uses mod-side queued macro replay by default.
-- `--live-send` keeps the older Python live action-send path and clears stale
-  queued macro state before comparison.
-- Observations and queued macro replay run from GJBaseGameLayer::processCommands.
-- The bridge parses completion metadata but keeps percent based on actual GD
-  progress.
-- The replay checker supports:
-  --stop-on-success
-  --require-start-percent-max
-  --require-start-x-max
-  --require-progress-tick
-  --require-progress-percent-min
+- Screenshot capture is implemented in scripts/capture_geode_frames.py.
+- Window capture helpers live in gd_capture/screen_capture.py.
+- Humanized macro replay is implemented in scripts/run_humanized_geode_macro.py.
+- Macro humanization is implemented in gd_human_model/macro_humanizer.py.
+- Humanized run summaries live in gd_trace/humanized_run.py.
 - artifacts/ is ignored and should remain local-only.
 
-Live validation:
-- Death macro:
-  examples/macros/death_macro.json
-  death_tick: 1154 in all 5 trials
-  x/y drift: 0.0
-  input latency: 0 frames
-
-- Simple clear macro:
-  examples/macros/simple_clear.json
-  artifact: artifacts/replay_check_20260625_001824
-  local/offline tiny clear level
-  5/5 clears
-  no deaths
-  success_rate: 1.0
-  survival_rate: 1.0
-  final_percent_std: 0.0
-  input_state_mismatch_ticks: 0
-  row_counts: [680, 680, 679, 679, 679]
-  x_position_max_diff: 4.895
-  y_position_max_diff: 2.635
+Latest live validation:
+- Triple-spike local/offline fixture:
+  raw centered macro press 192, release 212 cleared.
+  target-mode humanized profile sweep, 10 attempts each:
+    TopPlayer: 10/10 clears, timing std 0.71 frames
+    Advanced: 10/10 clears, timing std 1.37 frames
+    Intermediate: 10/10 clears, timing std 2.78 frames
+    Beginner: 9/10 clears, timing std 4.49 frames
 
 Interpretation:
-- Phase 4 is good enough to proceed to screenshot observation.
-- The remaining simple-clear position spread is small/bounded and near
-  end-of-level behavior, not input delivery.
-- Do not start neural-network training yet.
+- Phase 6 is complete enough to proceed.
+- The default macro humanization mode is target-centered: macro ticks are desired
+  click timings and human error is centered around them.
+- decision timing mode remains available for future policy-decision simulations.
+- The current Beginner profile behaves like a practiced player with noisy motor
+  execution, not an unpracticed sight-reading beginner.
+- Do not implement practice memory yet.
 
 Task:
-Implement the first Phase 5 screenshot observation spike.
+Implement Phase 7: imitation learning on one short local/offline level.
 
 Please:
-1. Inspect the repo structure and existing bridge/client conventions.
-2. Add a small Windows screen/window capture module.
-3. Add a manual script, likely scripts/capture_geode_frames.py, that:
-   - connects to the Geode bridge,
-   - receives bridge observations,
-   - captures visible Geometry Dash frames,
-   - saves frames under artifacts/frame_capture_<timestamp>/,
-   - writes a manifest JSONL aligning each frame to tick/percent/input/death
-     metadata.
-4. Add lightweight validation for captured frames:
-   - image files exist,
-   - dimensions match,
-   - frames are not blank,
-   - brightness/variance/hash changes over time,
-   - ticks are non-decreasing.
-5. Add focused synthetic tests for manifest writing/validation where possible.
-6. If Geometry Dash is open, run a short local/offline capture and inspect a
-   sample frame.
+1. Inspect the existing gd_capture, gd_trace, gd_env, gd_human_model, and
+   script code before editing.
+2. Add dataset preparation utilities that load frame manifests and traces,
+   align frame/progress/input/event labels, and create deterministic splits.
+3. Add event-label shifting for delayed perception/motor execution.
+4. Add a minimal one-level imitation policy.
+   Initial input:
+   - last 4 grayscale frames
+   - progress
+   - current input_down
+   Initial output:
+   - press_event probability
+   - release_event probability
+5. Add focused synthetic tests for frame/trace alignment, delayed-label
+   shifting, dataset windowing, and deterministic splitting.
+6. Run a small local/offline manual check if a suitable captured dataset and
+   Geometry Dash level are available.
 
 Constraints:
 - Use local/offline levels only.
 - Do not use online leaderboard submission.
-- Keep Geometry Dash windowed, visible, and unobstructed for live capture.
-- Do not commit generated images, traces, or artifacts.
-- Do not train neural networks yet.
+- Do not commit generated images, traces, model checkpoints, or artifacts.
+- Do not implement practice memory yet.
+- Do not require zero-shot generalization yet.
 ```

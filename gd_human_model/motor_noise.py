@@ -4,10 +4,64 @@ from __future__ import annotations
 
 import math
 import random
+from dataclasses import asdict, dataclass
 from typing import Iterable
+from typing import Literal
 
 from gd_human_model.events import Event, EventKind, Player, sort_events
 from gd_human_model.profile import HumanProfile
+
+DropReason = Literal["miss", "button_order"]
+
+
+@dataclass(frozen=True, slots=True)
+class HumanizedEventResult:
+    """Detailed result for one intended event after human-like execution."""
+
+    intended_event: Event
+    actual_event: Event | None
+    delta_since_previous_intended: int
+    motor_delay_frames: int
+    timing_std_frames: float
+    miss_probability: float
+    sampled_error_frames: float | None
+    raw_tick: int | None
+    drop_reason: DropReason | None
+
+    @property
+    def dropped(self) -> bool:
+        """Return whether the intended event produced no actual event."""
+
+        return self.actual_event is None
+
+    @property
+    def actual_delta_frames(self) -> int | None:
+        """Return actual_tick - intended_tick when an event was produced."""
+
+        if self.actual_event is None:
+            return None
+        return self.actual_event.tick - self.intended_event.tick
+
+    @property
+    def delay_adjusted_delta_frames(self) -> int | None:
+        """Return timing delta after subtracting the configured motor delay."""
+
+        if self.actual_event is None:
+            return None
+        return (
+            self.actual_event.tick
+            - self.intended_event.tick
+            - self.motor_delay_frames
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return JSON-serializable result data."""
+
+        data = asdict(self)
+        data["dropped"] = self.dropped
+        data["actual_delta_frames"] = self.actual_delta_frames
+        data["delay_adjusted_delta_frames"] = self.delay_adjusted_delta_frames
+        return data
 
 
 class MotorNoiseModel:
@@ -72,16 +126,44 @@ class MotorNoiseModel:
     def humanize_event(self, event: Event) -> Event | None:
         """Convert one intended event into one repaired actual event, or drop it."""
 
+        return self.humanize_event_result(event).actual_event
+
+    def humanize_event_result(self, event: Event) -> HumanizedEventResult:
+        """Convert one event and return detailed timing/drop provenance."""
+
         delta = self._delta_since_previous_intended(event)
         self._previous_intended_tick[event.player] = event.tick
+        timing_std = self.timing_std(event.kind, delta)
+        miss_probability = self.miss_probability(delta)
 
         if self.should_miss(delta):
-            return None
+            return HumanizedEventResult(
+                intended_event=event,
+                actual_event=None,
+                delta_since_previous_intended=delta,
+                motor_delay_frames=self.profile.motor_delay_frames,
+                timing_std_frames=timing_std,
+                miss_probability=miss_probability,
+                sampled_error_frames=None,
+                raw_tick=None,
+                drop_reason="miss",
+            )
 
         error = self.sample_timing_error(event.kind, delta, event.player)
         raw_tick = round(event.tick + self.profile.motor_delay_frames + error)
         raw_tick = max(0, int(raw_tick))
-        return self._repair_button_order(event, raw_tick)
+        actual_event = self._repair_button_order(event, raw_tick)
+        return HumanizedEventResult(
+            intended_event=event,
+            actual_event=actual_event,
+            delta_since_previous_intended=delta,
+            motor_delay_frames=self.profile.motor_delay_frames,
+            timing_std_frames=timing_std,
+            miss_probability=miss_probability,
+            sampled_error_frames=error,
+            raw_tick=raw_tick,
+            drop_reason=None if actual_event is not None else "button_order",
+        )
 
     def humanize_events(self, events: Iterable[Event]) -> list[Event]:
         """Humanize a batch of intended events in intended-time order."""

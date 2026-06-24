@@ -132,3 +132,25 @@ TOP_PLAYER = HumanProfile(
     miss_prob_close_tau=6.0,
     random_seed=0,
 )
+
+
+BUILTIN_PROFILES: dict[str, HumanProfile] = {
+    "beginner": BEGINNER,
+    "intermediate": INTERMEDIATE,
+    "advanced": ADVANCED,
+    "topplayer": TOP_PLAYER,
+    "top_player": TOP_PLAYER,
+    "top-player": TOP_PLAYER,
+    "top": TOP_PLAYER,
+}
+
+
+def profile_by_name(name: str) -> HumanProfile:
+    """Return a built-in profile by a case-insensitive name or alias."""
+
+    key = name.strip().lower()
+    try:
+        return BUILTIN_PROFILES[key]
+    except KeyError as exc:
+        valid = ", ".join(sorted(BUILTIN_PROFILES))
+        raise ValueError(f"unknown profile {name!r}; valid profiles: {valid}") from exc
