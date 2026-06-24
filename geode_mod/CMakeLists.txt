@@ -15,6 +15,19 @@ add_library(${PROJECT_NAME} SHARED
 )
 
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_23)
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WINSOCKAPI_
+)
 set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "")
+
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} ws2_32)
+endif()
+
+if(TARGET mat-json)
+    target_link_libraries(${PROJECT_NAME} mat-json)
+endif()
 
 setup_geode_mod(${PROJECT_NAME})

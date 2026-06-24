@@ -1,11 +1,14 @@
 # Geometry Dash / Geode Bridge Contract
 
-This folder will hold the real Geode mod later.
+This folder contains the first real Geode bridge implementation.
 
-For Phase 3, the implemented piece is the Python-side bridge and a dummy TCP
-server that speaks the same JSON-line protocol. The dummy server exists so the
-Python client, trace saving, reset handling, and action messages can be tested
-before any Geometry Dash hooks are written.
+The mod starts a local-only TCP server on `127.0.0.1:29430`, sends one
+observation message per gameplay update while a Python client is connected,
+accepts `action` and `reset` messages, and applies received jump press/release
+events on the next game update.
+
+The Python dummy server still exists for protocol tests, but the live workflow
+now connects to the Geode mod directly.
 
 ## Safety Rules
 
@@ -28,13 +31,14 @@ Every message is one JSON object followed by `\n`.
 
 ## Mod Responsibilities
 
-The future Geode mod should:
+The current Geode mod:
 
 1. Send one `observation` message per physics tick.
 2. Receive `action` messages from Python.
-3. Apply `press` / `release` on the next physics tick after receipt.
+3. Apply `press` / `release` on the next gameplay update after receipt.
 4. Receive `reset` messages and restart the attempt.
-5. Optionally log the same observations locally as JSONL.
+
+Trace saving is currently handled on the Python side.
 
 ## Observation Message
 
@@ -148,3 +152,55 @@ The current dummy bridge can be exercised with:
 
 The dummy server is not a Geometry Dash simulator. It only verifies the bridge
 wire format and Python client behavior.
+
+## Live Geode Check
+
+Build the mod:
+
+```powershell
+cmake -S geode_mod -B geode_mod/build
+cmake --build geode_mod/build --config RelWithDebInfo
+```
+
+If MSVC or Geode codegen fails because the repo path contains non-ASCII
+characters, build through an ASCII-only checkout or junction instead:
+
+```powershell
+cmake -S C:\path\to\geometry_dash_ai\geode_mod -B C:\path\to\geometry_dash_ai\geode_mod\build
+cmake --build C:\path\to\geometry_dash_ai\geode_mod\build --config RelWithDebInfo
+```
+
+Install `geode_mod/build/azberjibiou.geometry_dash_ai.geode` into your Geometry
+Dash `geode/mods` folder, launch Geometry Dash, and open a local/offline test
+level.
+
+Create a tiny macro such as:
+
+```json
+{
+  "metadata": {
+    "level_name": "local_test"
+  },
+  "events": [
+    {
+      "tick": 20,
+      "kind": "press",
+      "player": "p1"
+    },
+    {
+      "tick": 30,
+      "kind": "release",
+      "player": "p1"
+    }
+  ]
+}
+```
+
+Then run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_geode_bridge_macro.py macro.json trace.jsonl --max-observations 600
+```
+
+The script connects to `127.0.0.1:29430`, sends macro events as observations
+arrive, and writes the resulting trace as JSONL.
