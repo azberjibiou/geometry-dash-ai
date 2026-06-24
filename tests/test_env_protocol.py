@@ -27,6 +27,7 @@ def test_observation_message_roundtrip_and_trace_conversion() -> None:
         percent=5.5,
         dead=False,
         input_down=True,
+        completed=True,
         x_vel=8.0,
         rotation=45.0,
     )
@@ -36,6 +37,7 @@ def test_observation_message_roundtrip_and_trace_conversion() -> None:
     assert decoded == observation
     assert isinstance(decoded, BridgeObservation)
     trace_row = decoded.to_trace_row(fps=240, cbf=False, physics_bypass=False)
+    assert decoded.completed is True
     assert trace_row.tick == 12
     assert trace_row.time_ms == 50.0
     assert trace_row.input_down is True

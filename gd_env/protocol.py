@@ -39,6 +39,7 @@ class BridgeObservation:
     percent: float
     dead: bool
     input_down: bool
+    completed: bool = False
     x_vel: float = 0.0
     rotation: float = 0.0
     death_reason: str | None = None
@@ -65,6 +66,7 @@ class BridgeObservation:
             percent=_as_float(data, "percent"),
             dead=_as_bool(data, "dead"),
             input_down=_as_bool(data, "input_down"),
+            completed=_as_bool(data, "completed", default=False),
             x_vel=_as_float(data, "x_vel", default=0.0),
             rotation=_as_float(data, "rotation", default=0.0),
             death_reason=_as_optional_str(data, "death_reason", default=None),
@@ -345,8 +347,8 @@ def _as_float(data: Mapping[str, Any], key: str, default: float | None = None) -
     return float(value)
 
 
-def _as_bool(data: Mapping[str, Any], key: str) -> bool:
-    value = _required(data, key)
+def _as_bool(data: Mapping[str, Any], key: str, default: bool | None = None) -> bool:
+    value = _required(data, key, default)
     if not isinstance(value, bool):
         raise ProtocolError(f"{key} must be a bool")
     return value

@@ -92,3 +92,19 @@ def test_client_loads_macro_and_collects_mod_side_replay_diagnostics() -> None:
     ]
     assert diagnostics[0].data["intended_tick"] == 2
     assert diagnostics[0].data["applied_tick"] == 2
+
+
+def test_run_loaded_macro_can_stop_at_success_percent() -> None:
+    with DummyGeometryDashServer(max_ticks=30, tick_interval_seconds=0.005) as server:
+        assert server.port is not None
+        with GeometryDashClient(port=server.port, timeout_seconds=2.0) as client:
+            client.load_macro([])
+            initial = client.reset_attempt("stop_percent")
+            rows = client.run_loaded_macro(
+                max_observations=30,
+                initial_observation=initial,
+                stop_percent=25.0,
+            )
+
+    assert rows[-1].percent >= 25.0
+    assert len(rows) < 30

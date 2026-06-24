@@ -1,0 +1,9 @@
+{
+  "events": [],
+  "metadata": {
+    "description": "No-input clear fixture for the tiny local/offline clear test level.",
+    "level_name": "tiny_clear_test",
+    "probe_max_observations": 1200,
+    "success_percent": 100
+  }
+}

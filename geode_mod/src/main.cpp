@@ -663,7 +663,7 @@ void applyBridgeCommands(PlayLayer* layer) {
         if (command.kind == BridgeCommandKind::Reset) {
             state.p1Down = false;
             state.p2Down = false;
-            layer->resetLevel();
+            layer->fullReset();
             resetAttemptState(layer);
             continue;
         }
@@ -711,6 +711,7 @@ std::string makeObservationMessage(
     auto& state = attemptState();
     auto* player = layer->m_player1;
     auto position = player ? player->getPosition() : cocos2d::CCPointZero;
+    auto completed = static_cast<bool>(layer->m_hasCompletedLevel);
     auto percent = std::clamp(layer->getCurrentPercent(), 0.0f, 100.0f);
 
     auto observation = matjson::makeObject({
@@ -721,6 +722,7 @@ std::string makeObservationMessage(
         { "mode", modeFor(player) },
         { "gravity", player && player->m_isUpsideDown ? "reverse" : "normal" },
         { "percent", static_cast<double>(percent) },
+        { "completed", completed },
         { "dead", static_cast<bool>((player && player->m_isDead) || layer->m_playerDied) },
         { "input_down", state.p1Down },
         { "x_vel", player ? static_cast<double>(player->m_playerSpeed) : 0.0 },

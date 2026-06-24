@@ -150,6 +150,7 @@ class GeometryDashClient:
         physics_bypass: bool = False,
         trace_path: str | Path | None = None,
         initial_observation: BridgeObservation | None = None,
+        stop_percent: float | None = None,
     ) -> list[TraceRow]:
         """Receive observations, send due scripted events, and optionally save a trace."""
 
@@ -177,7 +178,7 @@ class GeometryDashClient:
                 self.send_event(sorted_events[next_event_index])
                 next_event_index += 1
 
-            if observation.dead:
+            if observation.dead or _reached_stop_percent(observation, stop_percent):
                 break
 
         if trace_path is not None:
@@ -194,6 +195,7 @@ class GeometryDashClient:
         trace_path: str | Path | None = None,
         initial_observation: BridgeObservation | None = None,
         diagnostics: list[BridgeDiagnostic] | None = None,
+        stop_percent: float | None = None,
     ) -> list[TraceRow]:
         """Collect a trace while the mod plays its pre-loaded macro."""
 
@@ -212,7 +214,7 @@ class GeometryDashClient:
                 )
             )
 
-            if observation.dead:
+            if observation.dead or _reached_stop_percent(observation, stop_percent):
                 break
 
         if trace_path is not None:
@@ -248,3 +250,12 @@ class GeometryDashClient:
                 continue
             if isinstance(message, ErrorMessage):
                 raise ProtocolError(message.message)
+
+
+def _reached_stop_percent(
+    observation: BridgeObservation,
+    stop_percent: float | None,
+) -> bool:
+    if stop_percent is None:
+        return False
+    return observation.percent >= stop_percent

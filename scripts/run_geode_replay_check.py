@@ -13,8 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from gd_env import GeometryDashClient
-from gd_trace import load_macro_json, summarize_replay_check
+from gd_env import BridgeObservation, GeometryDashClient
+from gd_trace import TraceRow, load_macro_json, summarize_replay_check
 from gd_trace.compare_trace import first_death_tick
 
 
@@ -33,6 +33,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--cbf", action="store_true")
     parser.add_argument("--physics-bypass", action="store_true")
     parser.add_argument("--success-percent", type=float, default=100.0)
+    parser.add_argument(
+        "--stop-on-success",
+        action="store_true",
+        help="stop each trace as soon as observation.percent reaches --success-percent",
+    )
+    parser.add_argument(
+        "--require-start-percent-max",
+        type=float,
+        help="fail if a trial's fresh tick-0 observation starts above this percent",
+    )
+    parser.add_argument(
+        "--require-start-x-max",
+        type=float,
+        help="fail if a trial's fresh tick-0 observation starts beyond this x position",
+    )
+    parser.add_argument(
+        "--require-progress-tick",
+        type=int,
+        help="tick used with --require-progress-percent-min to verify the expected level",
+    )
+    parser.add_argument(
+        "--require-progress-percent-min",
+        type=float,
+        help="minimum percent required at --require-progress-tick",
+    )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument(
         "--live-send",
@@ -45,6 +70,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--trials must be positive")
     if args.max_observations <= 0:
         parser.error("--max-observations must be positive")
+    if (
+        args.require_start_percent_max is not None
+        and not 0.0 <= args.require_start_percent_max <= 100.0
+    ):
+        parser.error("--require-start-percent-max must be between 0 and 100")
+    if args.require_start_x_max is not None and args.require_start_x_max < 0.0:
+        parser.error("--require-start-x-max must be non-negative")
+    if args.require_progress_tick is not None and args.require_progress_tick < 0:
+        parser.error("--require-progress-tick must be non-negative")
+    if (
+        args.require_progress_percent_min is not None
+        and not 0.0 <= args.require_progress_percent_min <= 100.0
+    ):
+        parser.error("--require-progress-percent-min must be between 0 and 100")
+    if (args.require_progress_tick is None) != (
+        args.require_progress_percent_min is None
+    ):
+        parser.error(
+            "--require-progress-tick and --require-progress-percent-min must be used together"
+        )
 
     macro_path = Path(args.macro_json)
     macro = load_macro_json(macro_path)
@@ -76,6 +121,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_observations=args.reset_wait_observations,
                 diagnostics=diagnostics,
             )
+            try:
+                _validate_start_observation(
+                    initial_observation,
+                    trial_number=trial_number,
+                    require_percent_max=args.require_start_percent_max,
+                    require_x_max=args.require_start_x_max,
+                )
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
             trace_path = output_dir / f"trial_{trial_number:03d}.jsonl"
             if args.live_send:
                 rows = client.run_scripted_events(
@@ -86,6 +141,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     physics_bypass=args.physics_bypass,
                     trace_path=trace_path,
                     initial_observation=initial_observation,
+                    stop_percent=args.success_percent if args.stop_on_success else None,
                 )
             else:
                 rows = client.run_loaded_macro(
@@ -96,7 +152,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     trace_path=trace_path,
                     initial_observation=initial_observation,
                     diagnostics=diagnostics,
+                    stop_percent=args.success_percent if args.stop_on_success else None,
                 )
+            try:
+                _validate_trace_progress(
+                    rows,
+                    trial_number=trial_number,
+                    require_tick=args.require_progress_tick,
+                    require_percent_min=args.require_progress_percent_min,
+                )
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
             traces.append(rows)
             diagnostics_document = [
                 diagnostic.to_dict() for diagnostic in diagnostics
@@ -108,6 +175,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "trace_path": str(trace_path),
                     "rows": len(rows),
                     "first_tick": rows[0].tick if rows else None,
+                    "start_percent": rows[0].percent if rows else None,
+                    "start_x": rows[0].x if rows else None,
                     "last_tick": rows[-1].tick if rows else None,
                     "final_percent": rows[-1].percent if rows else 0.0,
                     "death_tick": first_death_tick(rows),
@@ -135,6 +204,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "physics_bypass": args.physics_bypass,
             "max_observations": args.max_observations,
             "success_percent": args.success_percent,
+            "stop_on_success": args.stop_on_success,
+            "require_start_percent_max": args.require_start_percent_max,
+            "require_start_x_max": args.require_start_x_max,
+            "require_progress_tick": args.require_progress_tick,
+            "require_progress_percent_min": args.require_progress_percent_min,
             "live_send": args.live_send,
         },
         "trials": trial_results,
@@ -157,6 +231,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     return 0
+
+
+def _validate_start_observation(
+    observation: BridgeObservation,
+    *,
+    trial_number: int,
+    require_percent_max: float | None,
+    require_x_max: float | None,
+) -> None:
+    failures = []
+    if (
+        require_percent_max is not None
+        and observation.percent > require_percent_max
+    ):
+        failures.append(
+            f"percent {observation.percent:.3f} > {require_percent_max:.3f}"
+        )
+    if require_x_max is not None and observation.x > require_x_max:
+        failures.append(f"x {observation.x:.3f} > {require_x_max:.3f}")
+    if failures:
+        raise ValueError(
+            f"trial {trial_number} fresh start check failed: " + "; ".join(failures)
+        )
+
+
+def _validate_trace_progress(
+    rows: list[TraceRow],
+    *,
+    trial_number: int,
+    require_tick: int | None,
+    require_percent_min: float | None,
+) -> None:
+    if require_tick is None or require_percent_min is None:
+        return
+
+    row = next((candidate for candidate in rows if candidate.tick >= require_tick), None)
+    if row is None:
+        raise ValueError(
+            f"trial {trial_number} ended before progress guard tick {require_tick}"
+        )
+    if row.percent < require_percent_min:
+        raise ValueError(
+            f"trial {trial_number} progress check failed at tick {row.tick}: "
+            f"percent {row.percent:.3f} < {require_percent_min:.3f}"
+        )
 
 
 if __name__ == "__main__":

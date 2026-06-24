@@ -1395,6 +1395,8 @@ geode_mod/src/main.cpp
 examples/macros/no_input.json
 examples/macros/single_jump.json
 examples/macros/short_repeated_clicks.json
+examples/macros/death_macro.json
+examples/macros/simple_clear.json
   tiny local/offline replay macros
 ```
 
@@ -1596,15 +1598,60 @@ counts and first movement tick variation show the observation/update tick is
 still not an authoritative fixed physics tick.
 ```
 
+Latest Phase 4 validation update:
+
+```text
+Bridge alignment:
+  observations and queued macro replay now run from GJBaseGameLayer::processCommands
+  reset uses a fuller level reset path before resetting bridge attempt state
+  Python can stop a live trace on success percent for clear fixtures
+  replay checker can fail fast on wrong-level captures with start/progress guards
+
+Death macro:
+  macro: examples/macros/death_macro.json
+  trials: 5
+  death_tick: 1154 in all trials
+  x_position_max_diff: 0.0
+  y_position_max_diff: 0.0
+  input latency: 0 frames
+
+Simple clear macro:
+  macro: examples/macros/simple_clear.json
+  artifact: artifacts/replay_check_20260625_001824
+  level: tiny local/offline clear test level
+  command guards:
+    --stop-on-success
+    --require-start-percent-max 2
+    --require-start-x-max 50
+    --require-progress-tick 120
+    --require-progress-percent-min 10
+  trials: 5
+  deaths: none
+  success_rate: 1.0
+  survival_rate: 1.0
+  final_percent_std: 0.0
+  input_state_mismatch_ticks: 0
+  row_counts: [680, 680, 679, 679, 679]
+  x_position_max_diff: 4.895
+  y_position_max_diff: 2.635
+
+Interpretation:
+  Core no-input, jump, repeated-click, and death fixtures now replay with stable
+  inputs and deterministic or bounded outcomes under fixed settings.
+
+  The simple clear fixture validates outcome stability rather than exact
+  position identity. Small end-of-level position spread remains visible on the
+  tiny clear level, but all trials clear with no input mismatches and zero final
+  percent variance.
+```
+
 Next target:
 
 ```text
-Phase 4 hardening follow-up:
-authoritative attempt tick / fixed physics-step observation alignment
-
-Investigate whether a better Geode hook can emit exactly one observation per
-actual physics step and reset the attempt tick at the same point in the real
-level reset lifecycle.
+Phase 4 closeout:
+decide whether the remaining bounded simple-clear position spread is acceptable
+for moving to screenshot observation, or continue investigating end-of-level
+physics/reset behavior before Phase 5.
 ```
 
 ---
