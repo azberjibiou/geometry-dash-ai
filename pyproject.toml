@@ -13,6 +13,15 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
+[project.scripts]
+gd-trace-validate = "gd_trace.cli:trace_validate_main"
+gd-macro-validate = "gd_trace.cli:macro_validate_main"
+gd-trace-compare = "gd_trace.cli:trace_compare_main"
+gd-click-window = "gd_trace.cli:click_window_main"
+
+[tool.setuptools.packages.find]
+include = ["gd_human_model*", "gd_trace*"]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 pythonpath = ["."]
