@@ -672,14 +672,13 @@ void applyBridgeCommands(PlayLayer* layer) {
     }
 }
 
-void applyLoadedMacroEvents(PlayLayer* layer) {
+void applyLoadedMacroEvents(PlayLayer* layer, int attemptTick) {
     ensureAttemptState(layer);
     auto& state = attemptState();
     if (!state.macroActive) {
         return;
     }
 
-    auto const attemptTick = state.nextObservationTick;
     while (
         state.nextMacroEventIndex < state.loadedMacro.size()
         && state.loadedMacro[state.nextMacroEventIndex].tick <= attemptTick
@@ -701,13 +700,18 @@ void applyLoadedMacroEvents(PlayLayer* layer) {
     }
 }
 
-std::string makeObservationMessage(PlayLayer* layer) {
+std::string makeObservationMessage(
+    PlayLayer* layer,
+    int tick,
+    float dt,
+    bool isHalfTick,
+    bool isLastTick
+) {
     ensureAttemptState(layer);
     auto& state = attemptState();
     auto* player = layer->m_player1;
     auto position = player ? player->getPosition() : cocos2d::CCPointZero;
     auto percent = std::clamp(layer->getCurrentPercent(), 0.0f, 100.0f);
-    auto tick = state.nextObservationTick++;
 
     auto observation = matjson::makeObject({
         { "tick", tick },
@@ -722,6 +726,13 @@ std::string makeObservationMessage(PlayLayer* layer) {
         { "x_vel", player ? static_cast<double>(player->m_playerSpeed) : 0.0 },
         { "rotation", player ? static_cast<double>(player->getRotation()) : 0.0 },
         { "death_reason", player && player->m_isDead ? matjson::Value("player_dead") : matjson::Value(nullptr) },
+        { "bridge_hook", "process_commands" },
+        { "gd_current_step", layer->m_currentStep },
+        { "gd_tick_index", layer->m_tickIndex },
+        { "gd_is_between_steps", layer->m_isBetweenSteps },
+        { "gd_dt", static_cast<double>(dt) },
+        { "gd_is_half_tick", isHalfTick },
+        { "gd_is_last_tick", isLastTick },
     });
 
     bridgeServer().setCurrentTick(tick);
@@ -739,13 +750,35 @@ class $modify(AIBridgeGameLayer, GJBaseGameLayer) {
         auto* playLayer = typeinfo_cast<PlayLayer*>(this);
         if (playLayer && bridgeServer().isClientConnected()) {
             applyBridgeCommands(playLayer);
-            applyLoadedMacroEvents(playLayer);
         }
 
         GJBaseGameLayer::update(dt);
+    }
 
-        if (playLayer && bridgeServer().isClientConnected()) {
-            bridgeServer().enqueueObservation(makeObservationMessage(playLayer));
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        auto* playLayer = typeinfo_cast<PlayLayer*>(this);
+        auto shouldBridge = playLayer && bridgeServer().isClientConnected();
+
+        if (shouldBridge) {
+            ensureAttemptState(playLayer);
+            auto& state = attemptState();
+            auto const attemptTick = state.nextObservationTick;
+            bridgeServer().setCurrentTick(attemptTick);
+            applyLoadedMacroEvents(playLayer, attemptTick);
+        }
+
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+
+        if (shouldBridge) {
+            auto& state = attemptState();
+            auto const tick = state.nextObservationTick++;
+            bridgeServer().enqueueObservation(makeObservationMessage(
+                playLayer,
+                tick,
+                dt,
+                isHalfTick,
+                isLastTick
+            ));
         }
     }
 };

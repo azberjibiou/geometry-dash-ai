@@ -3,7 +3,7 @@
 This folder contains the first real Geode bridge implementation.
 
 The mod starts a local-only TCP server on `127.0.0.1:29430`, sends one
-observation message per gameplay update while a Python client is connected,
+observation message from `GJBaseGameLayer::processCommands` while a Python client is connected,
 accepts `action`, `load_macro`, and `reset` messages, and can either apply
 live-sent jump press/release events on the next game update or replay a loaded
 macro inside the mod by attempt tick.
@@ -34,13 +34,14 @@ Every message is one JSON object followed by `\n`.
 
 The current Geode mod:
 
-1. Send one `observation` message per physics tick.
+1. Send one `observation` message per `GJBaseGameLayer::processCommands`
+   gameplay step.
 2. Receive `action` messages from Python.
 3. Apply `press` / `release` on the next gameplay update after receipt.
 4. Receive `load_macro` messages and store a complete macro for deterministic
    replay.
 5. Arm the loaded macro after reset and apply due events from inside the mod by
-   attempt tick.
+   attempt tick immediately before that `processCommands` step.
 6. Receive `reset` messages and restart the attempt.
 
 Trace saving is currently handled on the Python side.
