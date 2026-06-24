@@ -1,0 +1,18 @@
+{
+  "events": [
+    {
+      "kind": "press",
+      "player": "p1",
+      "tick": 20
+    },
+    {
+      "kind": "release",
+      "player": "p1",
+      "tick": 30
+    }
+  ],
+  "metadata": {
+    "description": "One short p1 jump.",
+    "level_name": "local_offline_test"
+  }
+}

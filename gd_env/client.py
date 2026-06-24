@@ -12,6 +12,7 @@ from gd_trace.save_trace import save_trace_jsonl
 from gd_trace.trace_schema import TraceRow
 
 from gd_env.protocol import (
+    AckMessage,
     BridgeObservation,
     ErrorMessage,
     ProtocolError,
@@ -81,6 +82,32 @@ class GeometryDashClient:
 
         self._send(reset_message(reason))
 
+    def reset_attempt(
+        self,
+        reason: str = "requested",
+        *,
+        max_observations: int = 600,
+    ) -> BridgeObservation:
+        """Request a reset and return the first observation from the fresh attempt."""
+
+        self.send_reset(reason)
+        saw_reset_ack = False
+
+        for _ in range(max_observations):
+            message = self._receive()
+            if isinstance(message, ErrorMessage):
+                raise ProtocolError(message.message)
+            if isinstance(message, AckMessage):
+                if message.message == "reset queued":
+                    saw_reset_ack = True
+                continue
+            if not isinstance(message, BridgeObservation):
+                continue
+            if saw_reset_ack and message.tick == 0:
+                return message
+
+        raise TimeoutError("did not receive a fresh tick-0 observation after reset")
+
     def receive_observation(self) -> BridgeObservation:
         """Read messages until the next observation arrives."""
 
@@ -100,6 +127,7 @@ class GeometryDashClient:
         cbf: bool = False,
         physics_bypass: bool = False,
         trace_path: str | Path | None = None,
+        initial_observation: BridgeObservation | None = None,
     ) -> list[TraceRow]:
         """Receive observations, send due scripted events, and optionally save a trace."""
 
@@ -107,8 +135,11 @@ class GeometryDashClient:
         next_event_index = 0
         trace: list[TraceRow] = []
 
-        for _ in range(max_observations):
-            observation = self.receive_observation()
+        for observation_index in range(max_observations):
+            if observation_index == 0 and initial_observation is not None:
+                observation = initial_observation
+            else:
+                observation = self.receive_observation()
             trace.append(
                 observation.to_trace_row(
                     fps=fps,

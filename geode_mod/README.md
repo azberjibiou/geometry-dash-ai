@@ -204,3 +204,44 @@ Then run:
 
 The script connects to `127.0.0.1:29430`, sends macro events as observations
 arrive, and writes the resulting trace as JSONL.
+
+## Live Deterministic Replay Check
+
+After the one-shot bridge check works, run repeated trials with one identical
+macro:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_geode_replay_check.py examples\macros\single_jump.json --trials 5 --max-observations 600
+```
+
+Other tiny checked-in macros:
+
+```text
+examples/macros/no_input.json
+examples/macros/single_jump.json
+examples/macros/short_repeated_clicks.json
+```
+
+The replay-check script:
+
+1. Connects to the live bridge on `127.0.0.1:29430`.
+2. Sends a reset and waits for a fresh tick-0 observation before each trial.
+3. Runs the same macro for each trial.
+4. Saves per-trial traces under `artifacts/replay_check_<timestamp>/`.
+5. Writes `summary.json` with deterministic replay metrics.
+
+Important summary fields:
+
+```text
+final_percent_std
+death_tick_std
+x_position_max_diff
+y_position_max_diff
+success_rate
+survival_rate
+input_state_mismatch_ticks
+input_latency_by_event
+```
+
+Keep these live checks on local/offline levels only. `artifacts/` is ignored, so
+the generated traces and summaries should remain local.

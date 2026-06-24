@@ -1332,29 +1332,153 @@ Evaluate with human-like jitter so memorized timing must be robust.
 
 ---
 
-## 12. Current Next Step
+## 12. Current Status
 
-Start with this:
+Completed and pushed:
 
 ```text
 Phase 1:
 Python-only Human Model
+
+Phase 2:
+Trace and Macro Format
+
+Phase 3:
+Minimal Geometry Dash Bridge
+```
+
+Live smoke-test result:
+
+```text
+Commit: e331d43 Implement live Geode bridge
+Bridge: Geode mod listening on 127.0.0.1:29430
+Level used: Stereo Madness
+Python sent: press at tick 20, release at tick 30
+Observed: cube jumped in-game
+Trace: artifacts/live_geode_smoke_trace.jsonl
+Rows: 177
+Input down observed: ticks 24..31
+Final row: dead=true, death_reason=player_dead
+```
+
+The local smoke trace is intentionally ignored by Git through `artifacts/`.
+
+Current local target:
+
+```text
+Phase 4:
+Deterministic Replay Check
 ```
 
 Reason:
 
-It is independent of Geometry Dash, easy to test, and central to the goal of human-like practice learning.
+Before adding screenshots, policy learning, or practice memory, verify that the
+real Geometry Dash bridge gives stable outcomes for repeated identical macros.
+If identical input events do not replay consistently under fixed settings, the
+learning loop will be hard to trust.
 
-After Phase 1 works, move to:
+Phase 4 implementation:
 
 ```text
-Phase 2:
-Trace and Macro Format
+gd_trace/replay_check.py
+  reusable metrics for repeated identical replay traces
+
+scripts/run_geode_replay_check.py
+  manual live Geode replay runner
+
+examples/macros/no_input.json
+examples/macros/single_jump.json
+examples/macros/short_repeated_clicks.json
+  tiny local/offline replay macros
 ```
 
-Then:
+The replay summary reports:
 
 ```text
-Phase 3:
-Minimal Geometry Dash Bridge
+final_percent_std
+death_tick_std
+x_position_max_diff
+y_position_max_diff
+success_rate
+survival_rate
+input_state_mismatch_ticks
+observed input latency from macro event ticks to input_down transitions
+```
+
+Unit tests use synthetic traces only. Live Geometry Dash replay checks remain
+manual and write ignored files under `artifacts/`.
+
+Manual live workflow:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_geode_replay_check.py examples\macros\single_jump.json --trials 5 --max-observations 600
+```
+
+The script resets the open local/offline level before each trial, saves per-trial
+JSONL traces under `artifacts/replay_check_<timestamp>/`, and writes
+`summary.json` in the same folder.
+
+After replay stability is acceptable under fixed settings, the next target is:
+
+```text
+Phase 5:
+Screenshot Observation
+```
+
+---
+
+## 13. Prompt for Next Codex Chat
+
+Copy this into the next Codex chat:
+
+```text
+We are in the geometry_dash_ai repo. Please continue from plan.md after the live
+Geode bridge smoke test.
+
+Current status:
+- Phase 1, Phase 2, and Phase 3 are implemented.
+- Commit e331d43 "Implement live Geode bridge" was pushed to origin/main.
+- The Geode mod opens a local bridge on 127.0.0.1:29430.
+- A live smoke test in Stereo Madness succeeded:
+  Python sent press tick 20 and release tick 30, the cube jumped in-game, and
+  artifacts/live_geode_smoke_trace.jsonl captured 177 rows.
+- artifacts/ is ignored and should remain local-only.
+
+Task:
+Implement Phase 4: Deterministic Replay Check.
+
+Please:
+1. Inspect the existing code and tests first.
+2. Add reusable Python metric code for comparing repeated traces from identical
+   macros. Include at least:
+   - final_percent_std
+   - death_tick_std when deaths happen
+   - x_position_max_diff over aligned ticks
+   - y_position_max_diff over aligned ticks
+   - success_rate or survival_rate
+   - observed input latency, comparing macro event ticks to input_down changes
+3. Add pytest tests for the metric code using synthetic traces, not live Geometry
+   Dash.
+4. Add a script, probably under scripts/, that can run a replay check against the
+   live Geode bridge:
+   - input: macro JSON
+   - options: number of trials, max observations, fps/cbf/physics flags
+   - output: per-trial trace files under artifacts/ and a summary JSON or text
+5. Add or document tiny example macros for:
+   - no input
+   - single jump
+   - short repeated-click pattern
+6. Update README/plan docs with the exact live workflow.
+7. Run tests.
+
+Constraints:
+- Do not use online leaderboard submission.
+- Use local/offline levels only.
+- Do not commit generated artifacts or live traces.
+- Keep live Geometry Dash tests manual; CI/unit tests should stay synthetic.
+
+Success criterion:
+I can open a local level in Geometry Dash, run the replay-check script multiple
+times with the same macro, and get a summary showing whether the bridge is stable
+enough to proceed to screenshot observations and learning.
 ```

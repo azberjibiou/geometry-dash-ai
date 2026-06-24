@@ -37,6 +37,19 @@ def test_client_reset_restarts_dummy_attempt() -> None:
             assert restarted.input_down is False
 
 
+def test_client_reset_attempt_returns_fresh_tick_zero() -> None:
+    with DummyGeometryDashServer(max_ticks=40, tick_interval_seconds=0.005) as server:
+        assert server.port is not None
+        with GeometryDashClient(port=server.port, timeout_seconds=2.0) as client:
+            assert client.receive_observation().tick == 0
+            assert client.receive_observation().tick >= 1
+
+            restarted = client.reset_attempt("test", max_observations=20)
+
+            assert restarted.tick == 0
+            assert restarted.input_down is False
+
+
 def test_run_scripted_events_saves_trace(tmp_path) -> None:  # type: ignore[no-untyped-def]
     trace_path = tmp_path / "dummy_trace.jsonl"
 

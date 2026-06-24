@@ -1,0 +1,58 @@
+{
+  "events": [
+    {
+      "kind": "press",
+      "player": "p1",
+      "tick": 20
+    },
+    {
+      "kind": "release",
+      "player": "p1",
+      "tick": 26
+    },
+    {
+      "kind": "press",
+      "player": "p1",
+      "tick": 44
+    },
+    {
+      "kind": "release",
+      "player": "p1",
+      "tick": 50
+    },
+    {
+      "kind": "press",
+      "player": "p1",
+      "tick": 68
+    },
+    {
+      "kind": "release",
+      "player": "p1",
+      "tick": 74
+    },
+    {
+      "kind": "press",
+      "player": "p1",
+      "tick": 92
+    },
+    {
+      "kind": "release",
+      "player": "p1",
+      "tick": 98
+    },
+    {
+      "kind": "press",
+      "player": "p1",
+      "tick": 116
+    },
+    {
+      "kind": "release",
+      "player": "p1",
+      "tick": 122
+    }
+  ],
+  "metadata": {
+    "description": "Five short p1 clicks for replay stability checks.",
+    "level_name": "local_offline_test"
+  }
+}
