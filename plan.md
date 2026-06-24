@@ -1648,10 +1648,71 @@ Interpretation:
 Next target:
 
 ```text
-Phase 4 closeout:
-decide whether the remaining bounded simple-clear position spread is acceptable
-for moving to screenshot observation, or continue investigating end-of-level
-physics/reset behavior before Phase 5.
+Phase 5:
+Screenshot Observation
+
+Decision:
+Phase 4 is good enough to proceed. The bridge now has stable mod-side input
+replay, deterministic death validation, and stable simple-clear outcome
+validation. The remaining simple-clear position spread is small, bounded, and
+near end-of-level behavior, so it should not block the first screenshot
+observation spike.
+
+Do not start neural-network training yet.
+
+Immediate Phase 5 goal:
+prove that Python can capture usable Geometry Dash frames and align each frame
+with the latest bridge observation tick.
+
+Initial implementation plan:
+1. Add a small Windows screen/window capture module.
+   - Prefer a dependency-light approach if practical.
+   - Support an explicit window title and/or manual capture region.
+   - Keep Geometry Dash windowed, visible, and unobstructed for live checks.
+
+2. Add a manual capture script.
+   Suggested shape:
+     scripts/capture_geode_frames.py
+
+   It should:
+   - connect to the existing Geode bridge,
+   - receive observations,
+   - capture one frame per selected observation or at a configured stride,
+   - save ignored artifacts under artifacts/frame_capture_<timestamp>/,
+   - write a manifest JSONL mapping frame file to observation metadata.
+
+3. Manifest fields should include at minimum:
+   - frame_path
+   - tick
+   - time_ms
+   - percent
+   - x
+   - y
+   - mode
+   - gravity
+   - input_down
+   - dead
+   - capture_width
+   - capture_height
+   - capture_region or window title metadata
+
+4. Add validation for captured frames.
+   The first validator can be simple:
+   - frame files exist,
+   - dimensions match the manifest,
+   - frames are not blank,
+   - basic brightness/variance/hash values change over time,
+   - ticks are non-decreasing,
+   - observations and frames have a clear one-to-one or documented stride.
+
+5. Keep live checks manual and local/offline only.
+   - Do not submit online leaderboard runs.
+   - Do not commit generated images, traces, or artifacts.
+
+Phase 5 success criterion:
+Python can collect a small local/offline run containing aligned visual frames
+and bridge metadata, and the saved frames are visibly usable for later
+imitation-learning labels.
 ```
 
 ---
@@ -1661,54 +1722,82 @@ physics/reset behavior before Phase 5.
 Copy this into the next Codex chat:
 
 ```text
-We are in the geometry_dash_ai repo. Please continue from plan.md after the
-Phase 4 hardening implementation.
+We are in the geometry_dash_ai repo. Please continue from plan.md at Phase 5:
+Screenshot Observation.
 
 Current status:
-- Phase 1, Phase 2, Phase 3, initial Phase 4 replay metrics, and Phase 4
-  hardening are implemented.
+- Phase 1, Phase 2, Phase 3, and Phase 4 are implemented.
+- Current pushed commit: 6dfc9ed Add simple clear replay fixture
 - The Geode mod builds successfully with:
   C:\Program Files\CMake\bin\cmake.exe
 - The replay script uses mod-side queued macro replay by default.
 - `--live-send` keeps the older Python live action-send path and clears stale
   queued macro state before comparison.
-- Live queued replay validation was run on a local/offline level.
+- Observations and queued macro replay run from GJBaseGameLayer::processCommands.
+- The bridge parses completion metadata but keeps percent based on actual GD
+  progress.
+- The replay checker supports:
+  --stop-on-success
+  --require-start-percent-max
+  --require-start-x-max
+  --require-progress-tick
+  --require-progress-percent-min
 - artifacts/ is ignored and should remain local-only.
 
 Live validation:
-- Queued artifact: artifacts/replay_check_20260624_203558
-- Live-send artifact: artifacts/replay_check_20260624_203852
-- Queued replay applied press at tick 20 and release at tick 30 in every trial.
-- Queued observed input_down transitions also happened at ticks 20 and 30 in
-  every trial.
-- Live-send observed press at tick 21 in every trial and release at tick 32 or
-  33.
-- Queued path removed live TCP input latency variance.
-- Remaining drift appears to come from update/physics observation alignment:
-  zero/double movement step counts and first movement tick variation still
-  appear in traces.
-- pytest passed locally: 42 passed.
+- Death macro:
+  examples/macros/death_macro.json
+  death_tick: 1154 in all 5 trials
+  x/y drift: 0.0
+  input latency: 0 frames
+
+- Simple clear macro:
+  examples/macros/simple_clear.json
+  artifact: artifacts/replay_check_20260625_001824
+  local/offline tiny clear level
+  5/5 clears
+  no deaths
+  success_rate: 1.0
+  survival_rate: 1.0
+  final_percent_std: 0.0
+  input_state_mismatch_ticks: 0
+  row_counts: [680, 680, 679, 679, 679]
+  x_position_max_diff: 4.895
+  y_position_max_diff: 2.635
+
+Interpretation:
+- Phase 4 is good enough to proceed to screenshot observation.
+- The remaining simple-clear position spread is small/bounded and near
+  end-of-level behavior, not input delivery.
+- Do not start neural-network training yet.
 
 Task:
-Continue Phase 4 hardening follow-up: make observation ticks authoritative or
-identify the correct Geode hook for exactly one observation per real physics
-step.
+Implement the first Phase 5 screenshot observation spike.
 
 Please:
-1. Inspect the current Geode hook and replay diagnostics.
-2. Research locally in the Geode/GD bindings for a better physics-step hook or
-   stable attempt tick source.
-3. Implement a focused change that aligns observations to the real physics
-   update if possible.
-4. Preserve the queued macro path and canonical trace format.
-5. Keep live checks manual and local/offline only.
-6. Run synthetic tests and, if Geometry Dash is open on a local/offline level,
-   rerun queued replay to compare first_movement_ticks, zero_movement_steps,
-   double_movement_steps, and position drift.
+1. Inspect the repo structure and existing bridge/client conventions.
+2. Add a small Windows screen/window capture module.
+3. Add a manual script, likely scripts/capture_geode_frames.py, that:
+   - connects to the Geode bridge,
+   - receives bridge observations,
+   - captures visible Geometry Dash frames,
+   - saves frames under artifacts/frame_capture_<timestamp>/,
+   - writes a manifest JSONL aligning each frame to tick/percent/input/death
+     metadata.
+4. Add lightweight validation for captured frames:
+   - image files exist,
+   - dimensions match,
+   - frames are not blank,
+   - brightness/variance/hash changes over time,
+   - ticks are non-decreasing.
+5. Add focused synthetic tests for manifest writing/validation where possible.
+6. If Geometry Dash is open, run a short local/offline capture and inspect a
+   sample frame.
 
 Constraints:
 - Use local/offline levels only.
 - Do not use online leaderboard submission.
-- Do not commit generated artifacts or live traces.
-- Do not move to Phase 5 until update/physics tick alignment is understood.
+- Keep Geometry Dash windowed, visible, and unobstructed for live capture.
+- Do not commit generated images, traces, or artifacts.
+- Do not train neural networks yet.
 ```
