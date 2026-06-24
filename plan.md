@@ -1509,6 +1509,19 @@ This live TCP loop creates variable input latency, and the update/observation
 hook creates variable movement alignment.
 ```
 
+Decision:
+
+```text
+Yes, fix or fully explain observation/physics tick alignment before Phase 5.
+
+Reason:
+Queued mod-side macros fixed deterministic input timing, but traces still show
+zero/double movement steps and position drift. Screenshot labels, replay
+comparisons, imitation-learning labels, and later practice-memory updates will
+be hard to trust unless one trace tick corresponds to one real physics step, or
+unless the remaining drift is explicitly understood and bounded.
+```
+
 Do not move to Phase 5 yet until remaining update/physics tick alignment drift
 is understood.
 

@@ -311,3 +311,24 @@ macro_application_by_event
 
 Keep these live checks on local/offline levels only. `artifacts/` is ignored, so
 the generated traces and summaries should remain local.
+
+## Live Death Macro Probe
+
+To find a deterministic death macro for the currently open local/offline test
+level, run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\probe_geode_death_macro.py --trials 5 --max-observations 2400
+```
+
+The probe tries a few conservative queued macros and reports whether any one
+dies at the same trace tick in every trial with zero position drift. To save the
+first passing candidate as a checked-in example macro, pass an explicit output
+path:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\probe_geode_death_macro.py --trials 5 --max-observations 2400 --save-first examples\macros\death_macro.json
+```
+
+Only keep the saved macro if the output reports a non-null
+`first_deterministic_death`.

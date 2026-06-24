@@ -1,0 +1,19 @@
+{
+  "events": [
+    {
+      "kind": "press",
+      "player": "p1",
+      "tick": 20
+    },
+    {
+      "kind": "release",
+      "player": "p1",
+      "tick": 30
+    }
+  ],
+  "metadata": {
+    "description": "One early jump followed by no input.",
+    "level_name": "local_offline_test",
+    "probe_max_observations": 2400
+  }
+}
