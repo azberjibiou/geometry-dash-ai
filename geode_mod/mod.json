@@ -1,0 +1,14 @@
+{
+    "geode": "5.7.1",
+    "gd": {
+        "win": "*",
+        "mac": "*",
+        "android": "*",
+        "ios": "*"
+    },
+    "version": "0.1.0",
+    "id": "azberjibiou.geometry_dash_ai",
+    "name": "Geometry Dash AI Bridge",
+    "developer": "azberjibiou",
+    "description": "Local-only bridge for Geometry Dash AI experiments."
+}

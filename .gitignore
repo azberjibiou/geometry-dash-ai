@@ -10,3 +10,5 @@ build/
 *.egg-info/
 .venv/
 venv/
+geode_mod/build/
+geode_mod/*.geode
