@@ -6,9 +6,11 @@ from gd_trace.load_trace import load_macro_json, load_trace_jsonl
 from gd_trace.macro_schema import Macro, MacroSchemaError
 from gd_trace.replay_check import (
     InputLatencySummary,
+    MacroApplicationSummary,
     ObservedInputTransition,
     ReplayCheckSummary,
     detect_input_transitions,
+    summarize_macro_applications,
     summarize_input_latency,
     summarize_replay_check,
 )
@@ -18,6 +20,7 @@ from gd_trace.trace_schema import TraceRow, TraceSchemaError
 __all__ = [
     "ClickWindow",
     "InputLatencySummary",
+    "MacroApplicationSummary",
     "Macro",
     "MacroSchemaError",
     "ObservedInputTransition",
@@ -33,5 +36,6 @@ __all__ = [
     "save_macro_json",
     "save_trace_jsonl",
     "summarize_input_latency",
+    "summarize_macro_applications",
     "summarize_replay_check",
 ]

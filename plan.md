@@ -1384,7 +1384,13 @@ gd_trace/replay_check.py
   reusable metrics for repeated identical replay traces
 
 scripts/run_geode_replay_check.py
-  manual live Geode replay runner
+  manual live Geode replay runner, queued macro replay by default
+
+gd_env/protocol.py and gd_env/client.py
+  load_macro and diagnostic messages for queued replay
+
+geode_mod/src/main.cpp
+  mod-side macro storage and attempt-tick playback
 
 examples/macros/no_input.json
 examples/macros/single_jump.json
@@ -1403,6 +1409,10 @@ success_rate
 survival_rate
 input_state_mismatch_ticks
 observed input latency from macro event ticks to input_down transitions
+first movement tick per trial
+zero movement step counts
+double movement step counts
+mod-side macro application tick per intended event
 ```
 
 Unit tests use synthetic traces only. Live Geometry Dash replay checks remain
@@ -1414,15 +1424,174 @@ Manual live workflow:
 .\.venv\Scripts\python.exe scripts\run_geode_replay_check.py examples\macros\single_jump.json --trials 5 --max-observations 600
 ```
 
+The replay check now uses mod-side queued macro replay by default:
+
+```text
+Python sends load_macro once
+Python sends reset before each trial
+Geode applies due macro events by attempt tick inside the update hook
+Python collects observations and diagnostic messages
+```
+
+To run the older live TCP action-send path for smoke testing:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_geode_replay_check.py examples\macros\single_jump.json --trials 5 --max-observations 600 --live-send
+```
+
 The script resets the open local/offline level before each trial, saves per-trial
 JSONL traces under `artifacts/replay_check_<timestamp>/`, and writes
 `summary.json` in the same folder.
 
-After replay stability is acceptable under fixed settings, the next target is:
+Live Phase 4 replay check result:
 
 ```text
-Phase 5:
-Screenshot Observation
+Commit: e2bf09b Implement deterministic replay check
+
+Live check level:
+local/offline test level
+
+single_jump.json:
+  trials: 5
+  deaths: none
+  survival_rate: 1.0
+  final_percent_std: 0.00399
+  x_position_max_diff: 2.60
+  y_position_max_diff: 0.0
+  input latency: mostly stable, press +1 frame, release +2/+3 frames
+
+no_input.json:
+  trials: 5
+  deaths: none
+  survival_rate: 1.0
+  final_percent_std: 0.00798
+  x_position_max_diff: 3.89
+  y_position_max_diff: 63.85
+  input_state_mismatch_ticks: 0
+
+short_repeated_clicks.json:
+  trials: 5
+  deaths: none
+  survival_rate: 1.0
+  final_percent_std: 0.0
+  x_position_max_diff: 1.30
+  y_position_max_diff: 66.36
+  input latency: varied around +1 to +4 frames
+  input_state_mismatch_ticks: 10
+```
+
+Investigation findings:
+
+```text
+The bridge is runnable and reset works, but replay is not deterministic enough
+yet.
+
+The no-input run diverged even though input_down stayed identical, so the issue
+is not only Python macro timing.
+
+First movement ticks for no_input were:
+[4, 3, 3, 3, 4]
+
+Adjacent observations sometimes showed zero movement steps and sometimes double
+movement steps. This means the current trace tick is a synthetic observation
+counter, not an authoritative fixed Geometry Dash physics tick.
+
+Current Geode hook:
+  GJBaseGameLayer::update(dt)
+  then enqueue observation
+
+Current Python macro behavior:
+  Python receives observation tick N
+  then sends any events whose macro tick <= N over TCP
+  the mod applies received events on a later update
+
+This live TCP loop creates variable input latency, and the update/observation
+hook creates variable movement alignment.
+```
+
+Do not move to Phase 5 yet until remaining update/physics tick alignment drift
+is understood.
+
+Phase 4 hardening implementation status:
+
+```text
+Phase 4 hardening:
+Mod-side deterministic macro queue / pre-scheduled replay
+
+Implemented locally:
+- protocol message: load_macro
+- protocol message: diagnostic
+- Python client method: load_macro(...)
+- Python client method: run_loaded_macro(...)
+- replay script defaults to queued macro replay
+- --live-send keeps the older live action-send path
+- --live-send clears any stale queued macro before comparison
+- Geode mod stores a loaded macro inactive until reset
+- Geode mod applies queued events by attempt tick inside the update hook
+- summary.json reports movement-step diagnostics and macro application ticks
+
+Verification:
+- pytest: 42 passed
+- Geode CMake build: succeeded using `C:\Program Files\CMake\bin\cmake.exe`
+- Live queued replay validation: completed on local/offline test level
+```
+
+Live validation result:
+
+```text
+Queued mod-side replay:
+  artifact: artifacts/replay_check_20260624_203558
+  macro: examples/macros/single_jump.json
+  trials: 5
+  deaths: none
+  survival_rate: 1.0
+  input latency: press 0 frames, release 0 frames
+  macro application: press tick 20 in all trials, release tick 30 in all trials
+  input_state_mismatch_ticks: 0
+  first_movement_ticks: [3, 4, 4, 3, 3]
+  zero_movement_step_counts: [3, 9, 18, 11, 28]
+  double_movement_step_counts: [1, 7, 16, 11, 23]
+  x_position_max_diff: 10.386
+  y_position_max_diff: 2.467
+
+Live-send comparison:
+  artifact: artifacts/replay_check_20260624_203852
+  macro: examples/macros/single_jump.json
+  trials: 5
+  deaths: none
+  survival_rate: 1.0
+  input latency: press +1 frame in all trials, release +2/+3 frames
+  input_latency_mean_frames: 1.6
+  input_latency_std_frames: 0.663
+  input_state_mismatch_ticks: 1
+  first_movement_ticks: [3, 3, 3, 3, 3]
+  zero_movement_step_counts: [5, 3, 12, 15, 7]
+  double_movement_step_counts: [3, 1, 11, 14, 6]
+  x_position_max_diff: 2.597
+  y_position_max_diff: 0.0
+```
+
+Interpretation:
+
+```text
+The queued macro path removes live TCP input latency variance. Intended macro
+ticks, mod-side application ticks, and observed input_down transitions now align
+exactly for the single-jump macro.
+
+Remaining drift is not from live action delivery. The zero/double movement step
+counts and first movement tick variation show the observation/update tick is
+still not an authoritative fixed physics tick.
+```
+
+Next target:
+
+```text
+Phase 4 hardening follow-up:
+authoritative attempt tick / fixed physics-step observation alignment
+
+Investigate whether a better Geode hook can emit exactly one observation per
+actual physics step and reset the attempt tick at the same point in the real
+level reset lifecycle.
 ```
 
 ---
@@ -1432,53 +1601,54 @@ Screenshot Observation
 Copy this into the next Codex chat:
 
 ```text
-We are in the geometry_dash_ai repo. Please continue from plan.md after the live
-Geode bridge smoke test.
+We are in the geometry_dash_ai repo. Please continue from plan.md after the
+Phase 4 hardening implementation.
 
 Current status:
-- Phase 1, Phase 2, and Phase 3 are implemented.
-- Commit e331d43 "Implement live Geode bridge" was pushed to origin/main.
-- The Geode mod opens a local bridge on 127.0.0.1:29430.
-- A live smoke test in Stereo Madness succeeded:
-  Python sent press tick 20 and release tick 30, the cube jumped in-game, and
-  artifacts/live_geode_smoke_trace.jsonl captured 177 rows.
+- Phase 1, Phase 2, Phase 3, initial Phase 4 replay metrics, and Phase 4
+  hardening are implemented.
+- The Geode mod builds successfully with:
+  C:\Program Files\CMake\bin\cmake.exe
+- The replay script uses mod-side queued macro replay by default.
+- `--live-send` keeps the older Python live action-send path and clears stale
+  queued macro state before comparison.
+- Live queued replay validation was run on a local/offline level.
 - artifacts/ is ignored and should remain local-only.
 
+Live validation:
+- Queued artifact: artifacts/replay_check_20260624_203558
+- Live-send artifact: artifacts/replay_check_20260624_203852
+- Queued replay applied press at tick 20 and release at tick 30 in every trial.
+- Queued observed input_down transitions also happened at ticks 20 and 30 in
+  every trial.
+- Live-send observed press at tick 21 in every trial and release at tick 32 or
+  33.
+- Queued path removed live TCP input latency variance.
+- Remaining drift appears to come from update/physics observation alignment:
+  zero/double movement step counts and first movement tick variation still
+  appear in traces.
+- pytest passed locally: 42 passed.
+
 Task:
-Implement Phase 4: Deterministic Replay Check.
+Continue Phase 4 hardening follow-up: make observation ticks authoritative or
+identify the correct Geode hook for exactly one observation per real physics
+step.
 
 Please:
-1. Inspect the existing code and tests first.
-2. Add reusable Python metric code for comparing repeated traces from identical
-   macros. Include at least:
-   - final_percent_std
-   - death_tick_std when deaths happen
-   - x_position_max_diff over aligned ticks
-   - y_position_max_diff over aligned ticks
-   - success_rate or survival_rate
-   - observed input latency, comparing macro event ticks to input_down changes
-3. Add pytest tests for the metric code using synthetic traces, not live Geometry
-   Dash.
-4. Add a script, probably under scripts/, that can run a replay check against the
-   live Geode bridge:
-   - input: macro JSON
-   - options: number of trials, max observations, fps/cbf/physics flags
-   - output: per-trial trace files under artifacts/ and a summary JSON or text
-5. Add or document tiny example macros for:
-   - no input
-   - single jump
-   - short repeated-click pattern
-6. Update README/plan docs with the exact live workflow.
-7. Run tests.
+1. Inspect the current Geode hook and replay diagnostics.
+2. Research locally in the Geode/GD bindings for a better physics-step hook or
+   stable attempt tick source.
+3. Implement a focused change that aligns observations to the real physics
+   update if possible.
+4. Preserve the queued macro path and canonical trace format.
+5. Keep live checks manual and local/offline only.
+6. Run synthetic tests and, if Geometry Dash is open on a local/offline level,
+   rerun queued replay to compare first_movement_ticks, zero_movement_steps,
+   double_movement_steps, and position drift.
 
 Constraints:
-- Do not use online leaderboard submission.
 - Use local/offline levels only.
+- Do not use online leaderboard submission.
 - Do not commit generated artifacts or live traces.
-- Keep live Geometry Dash tests manual; CI/unit tests should stay synthetic.
-
-Success criterion:
-I can open a local level in Geometry Dash, run the replay-check script multiple
-times with the same macro, and get a summary showing whether the bridge is stable
-enough to proceed to screenshot observations and learning.
+- Do not move to Phase 5 until update/physics tick alignment is understood.
 ```

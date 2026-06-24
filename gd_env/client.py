@@ -5,7 +5,7 @@ from __future__ import annotations
 import socket
 from pathlib import Path
 from types import TracebackType
-from typing import Iterable, TextIO
+from typing import Any, Iterable, Mapping, TextIO
 
 from gd_human_model.events import Event, sort_events
 from gd_trace.save_trace import save_trace_jsonl
@@ -13,12 +13,14 @@ from gd_trace.trace_schema import TraceRow
 
 from gd_env.protocol import (
     AckMessage,
+    BridgeDiagnostic,
     BridgeObservation,
     ErrorMessage,
     ProtocolError,
     action_message,
     decode_message,
     encode_message,
+    load_macro_message,
     reset_message,
 )
 
@@ -77,6 +79,26 @@ class GeometryDashClient:
 
         self._send(action_message(event))
 
+    def load_macro(
+        self,
+        events: Iterable[Event],
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        max_messages: int = 600,
+    ) -> AckMessage:
+        """Load a complete macro into the mod and wait for acknowledgement."""
+
+        self._send(load_macro_message(list(events), metadata=metadata))
+
+        for _ in range(max_messages):
+            message = self._receive()
+            if isinstance(message, ErrorMessage):
+                raise ProtocolError(message.message)
+            if isinstance(message, AckMessage) and message.message == "macro loaded":
+                return message
+
+        raise TimeoutError("did not receive macro loaded acknowledgement")
+
     def send_reset(self, reason: str = "requested") -> None:
         """Request restart/reset for the current attempt."""
 
@@ -87,6 +109,7 @@ class GeometryDashClient:
         reason: str = "requested",
         *,
         max_observations: int = 600,
+        diagnostics: list[BridgeDiagnostic] | None = None,
     ) -> BridgeObservation:
         """Request a reset and return the first observation from the fresh attempt."""
 
@@ -101,6 +124,10 @@ class GeometryDashClient:
                 if message.message == "reset queued":
                     saw_reset_ack = True
                 continue
+            if isinstance(message, BridgeDiagnostic):
+                if diagnostics is not None:
+                    diagnostics.append(message)
+                continue
             if not isinstance(message, BridgeObservation):
                 continue
             if saw_reset_ack and message.tick == 0:
@@ -111,12 +138,7 @@ class GeometryDashClient:
     def receive_observation(self) -> BridgeObservation:
         """Read messages until the next observation arrives."""
 
-        while True:
-            message = self._receive()
-            if isinstance(message, BridgeObservation):
-                return message
-            if isinstance(message, ErrorMessage):
-                raise ProtocolError(message.message)
+        return self._receive_observation()
 
     def run_scripted_events(
         self,
@@ -162,6 +184,41 @@ class GeometryDashClient:
             save_trace_jsonl(trace, trace_path)
         return trace
 
+    def run_loaded_macro(
+        self,
+        *,
+        max_observations: int,
+        fps: int = 240,
+        cbf: bool = False,
+        physics_bypass: bool = False,
+        trace_path: str | Path | None = None,
+        initial_observation: BridgeObservation | None = None,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> list[TraceRow]:
+        """Collect a trace while the mod plays its pre-loaded macro."""
+
+        trace: list[TraceRow] = []
+
+        for observation_index in range(max_observations):
+            if observation_index == 0 and initial_observation is not None:
+                observation = initial_observation
+            else:
+                observation = self._receive_observation(diagnostics=diagnostics)
+            trace.append(
+                observation.to_trace_row(
+                    fps=fps,
+                    cbf=cbf,
+                    physics_bypass=physics_bypass,
+                )
+            )
+
+            if observation.dead:
+                break
+
+        if trace_path is not None:
+            save_trace_jsonl(trace, trace_path)
+        return trace
+
     def _send(self, message: dict[str, object]) -> None:
         if self._writer is None:
             raise RuntimeError("client is not connected")
@@ -175,3 +232,19 @@ class GeometryDashClient:
         if line == "":
             raise EOFError("bridge connection closed")
         return decode_message(line)
+
+    def _receive_observation(
+        self,
+        *,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> BridgeObservation:
+        while True:
+            message = self._receive()
+            if isinstance(message, BridgeObservation):
+                return message
+            if isinstance(message, BridgeDiagnostic):
+                if diagnostics is not None:
+                    diagnostics.append(message)
+                continue
+            if isinstance(message, ErrorMessage):
+                raise ProtocolError(message.message)

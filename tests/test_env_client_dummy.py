@@ -66,3 +66,29 @@ def test_run_scripted_events_saves_trace(tmp_path) -> None:  # type: ignore[no-u
     assert loaded_rows == rows
     assert len(rows) == 12
     assert any(row.input_down for row in rows)
+
+
+def test_client_loads_macro_and_collects_mod_side_replay_diagnostics() -> None:
+    with DummyGeometryDashServer(max_ticks=30, tick_interval_seconds=0.005) as server:
+        assert server.port is not None
+        with GeometryDashClient(port=server.port, timeout_seconds=2.0) as client:
+            ack = client.load_macro([Event(2, "press"), Event(5, "release")])
+            assert ack.message == "macro loaded"
+
+            diagnostics = []
+            initial = client.reset_attempt("queued_macro", diagnostics=diagnostics)
+            rows = client.run_loaded_macro(
+                max_observations=10,
+                initial_observation=initial,
+                diagnostics=diagnostics,
+            )
+
+    assert any(row.input_down for row in rows)
+    assert rows[2].input_down is True
+    assert rows[5].input_down is False
+    assert [diagnostic.kind for diagnostic in diagnostics] == [
+        "macro_event_applied",
+        "macro_event_applied",
+    ]
+    assert diagnostics[0].data["intended_tick"] == 2
+    assert diagnostics[0].data["applied_tick"] == 2

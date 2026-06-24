@@ -22,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace geode::prelude;
@@ -36,7 +37,15 @@ constexpr std::size_t kMaxOutboundMessages = 512;
 
 enum class BridgeCommandKind {
     Action,
+    LoadMacro,
     Reset,
+};
+
+struct MacroEvent {
+    int tick = 0;
+    bool down = false;
+    bool player2 = false;
+    int index = 0;
 };
 
 struct BridgeCommand {
@@ -45,6 +54,7 @@ struct BridgeCommand {
     bool player2 = false;
     int tick = 0;
     std::string reason;
+    std::vector<MacroEvent> macroEvents;
 };
 
 std::string compactJson(matjson::Value const& value) {
@@ -65,6 +75,16 @@ std::string makeErrorMessage(std::string_view message) {
         { "version", kProtocolVersion },
         { "type", "error" },
         { "message", std::string(message) },
+    }));
+}
+
+std::string makeDiagnosticMessage(std::string_view kind, int tick, matjson::Value data) {
+    return compactJson(matjson::makeObject({
+        { "version", kProtocolVersion },
+        { "type", "diagnostic" },
+        { "kind", std::string(kind) },
+        { "tick", tick >= 0 ? matjson::Value(tick) : matjson::Value(nullptr) },
+        { "data", std::move(data) },
     }));
 }
 
@@ -90,6 +110,40 @@ std::optional<matjson::Value const*> readJsonObjectField(
         return std::nullopt;
     }
     return &child;
+}
+
+std::optional<matjson::Value const*> readJsonArrayField(
+    matjson::Value const& value,
+    std::string_view key
+) {
+    auto result = value.get(key);
+    if (result.isErr()) {
+        return std::nullopt;
+    }
+    auto const& child = result.unwrap();
+    if (!child.isArray()) {
+        return std::nullopt;
+    }
+    return &child;
+}
+
+void sortMacroEvents(std::vector<MacroEvent>& events) {
+    std::stable_sort(events.begin(), events.end(), [](MacroEvent const& a, MacroEvent const& b) {
+        if (a.tick != b.tick) {
+            return a.tick < b.tick;
+        }
+        if (a.player2 != b.player2) {
+            return !a.player2 && b.player2;
+        }
+        if (a.down != b.down) {
+            return a.down && !b.down;
+        }
+        return a.index < b.index;
+    });
+
+    for (std::size_t index = 0; index < events.size(); ++index) {
+        events[index].index = static_cast<int>(index);
+    }
 }
 
 std::string modeFor(PlayerObject* player) {
@@ -423,6 +477,52 @@ private:
             return makeAckMessage("action queued", m_currentTick.load());
         }
 
+        if (*type == "load_macro") {
+            auto events = readJsonArrayField(message, "events");
+            if (!events) {
+                return makeErrorMessage("load_macro message must contain events array");
+            }
+
+            std::vector<MacroEvent> macroEvents;
+            macroEvents.reserve((**events).size());
+            int eventIndex = 0;
+            for (auto const& eventValue : **events) {
+                if (!eventValue.isObject()) {
+                    return makeErrorMessage("macro event must be an object");
+                }
+
+                auto tick = readJsonField<int>(eventValue, "tick");
+                auto kind = readJsonField<std::string>(eventValue, "kind");
+                auto player = readJsonField<std::string>(eventValue, "player").value_or("p1");
+                if (!tick || !kind) {
+                    return makeErrorMessage("event.tick and event.kind are required");
+                }
+                if (*tick < 0) {
+                    return makeErrorMessage("event.tick must be non-negative");
+                }
+                if (*kind != "press" && *kind != "release") {
+                    return makeErrorMessage("event.kind must be 'press' or 'release'");
+                }
+                if (player != "p1" && player != "p2") {
+                    return makeErrorMessage("event.player must be 'p1' or 'p2'");
+                }
+
+                macroEvents.push_back(MacroEvent {
+                    .tick = *tick,
+                    .down = *kind == "press",
+                    .player2 = player == "p2",
+                    .index = eventIndex++,
+                });
+            }
+            sortMacroEvents(macroEvents);
+
+            this->pushCommand(BridgeCommand {
+                .kind = BridgeCommandKind::LoadMacro,
+                .macroEvents = std::move(macroEvents),
+            });
+            return makeAckMessage("macro loaded", m_currentTick.load());
+        }
+
         if (*type == "reset") {
             auto reason = readJsonField<std::string>(message, "reason").value_or("requested");
             this->pushCommand(BridgeCommand {
@@ -502,6 +602,10 @@ struct AttemptState {
     int nextObservationTick = 0;
     bool p1Down = false;
     bool p2Down = false;
+    bool macroLoaded = false;
+    bool macroActive = false;
+    std::size_t nextMacroEventIndex = 0;
+    std::vector<MacroEvent> loadedMacro;
 };
 
 AttemptState& attemptState() {
@@ -515,6 +619,8 @@ void resetAttemptState(PlayLayer* layer) {
     state.nextObservationTick = 0;
     state.p1Down = false;
     state.p2Down = false;
+    state.macroActive = state.macroLoaded;
+    state.nextMacroEventIndex = 0;
     bridgeServer().setCurrentTick(0);
 }
 
@@ -522,6 +628,17 @@ void ensureAttemptState(PlayLayer* layer) {
     auto& state = attemptState();
     if (state.layer != layer) {
         resetAttemptState(layer);
+    }
+}
+
+void applyInputEvent(PlayLayer* layer, bool down, bool player2) {
+    auto& state = attemptState();
+    layer->handleButton(down, kJumpButton, !player2);
+    if (player2) {
+        state.p2Down = down;
+    }
+    else {
+        state.p1Down = down;
     }
 }
 
@@ -535,6 +652,14 @@ void applyBridgeCommands(PlayLayer* layer) {
     auto& state = attemptState();
 
     for (auto const& command : commands) {
+        if (command.kind == BridgeCommandKind::LoadMacro) {
+            state.loadedMacro = command.macroEvents;
+            state.macroLoaded = true;
+            state.macroActive = false;
+            state.nextMacroEventIndex = 0;
+            continue;
+        }
+
         if (command.kind == BridgeCommandKind::Reset) {
             state.p1Down = false;
             state.p2Down = false;
@@ -543,13 +668,36 @@ void applyBridgeCommands(PlayLayer* layer) {
             continue;
         }
 
-        layer->handleButton(command.down, kJumpButton, !command.player2);
-        if (command.player2) {
-            state.p2Down = command.down;
-        }
-        else {
-            state.p1Down = command.down;
-        }
+        applyInputEvent(layer, command.down, command.player2);
+    }
+}
+
+void applyLoadedMacroEvents(PlayLayer* layer) {
+    ensureAttemptState(layer);
+    auto& state = attemptState();
+    if (!state.macroActive) {
+        return;
+    }
+
+    auto const attemptTick = state.nextObservationTick;
+    while (
+        state.nextMacroEventIndex < state.loadedMacro.size()
+        && state.loadedMacro[state.nextMacroEventIndex].tick <= attemptTick
+    ) {
+        auto const& event = state.loadedMacro[state.nextMacroEventIndex];
+        applyInputEvent(layer, event.down, event.player2);
+        bridgeServer().enqueueObservation(makeDiagnosticMessage(
+            "macro_event_applied",
+            attemptTick,
+            matjson::makeObject({
+                { "event_index", event.index },
+                { "intended_tick", event.tick },
+                { "applied_tick", attemptTick },
+                { "kind", event.down ? matjson::Value("press") : matjson::Value("release") },
+                { "player", event.player2 ? matjson::Value("p2") : matjson::Value("p1") },
+            })
+        ));
+        state.nextMacroEventIndex += 1;
     }
 }
 
@@ -591,6 +739,7 @@ class $modify(AIBridgeGameLayer, GJBaseGameLayer) {
         auto* playLayer = typeinfo_cast<PlayLayer*>(this);
         if (playLayer && bridgeServer().isClientConnected()) {
             applyBridgeCommands(playLayer);
+            applyLoadedMacroEvents(playLayer);
         }
 
         GJBaseGameLayer::update(dt);

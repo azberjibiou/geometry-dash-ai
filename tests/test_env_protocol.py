@@ -2,10 +2,14 @@ import pytest
 
 from gd_env.protocol import (
     BridgeObservation,
+    BridgeDiagnostic,
+    LoadMacroCommand,
     ProtocolError,
     action_message,
     decode_message,
+    diagnostic_message,
     encode_message,
+    load_macro_message,
     observation_message,
     reset_message,
 )
@@ -43,6 +47,38 @@ def test_action_and_reset_messages_roundtrip() -> None:
     assert decode_message(encode_message(action_message(event))) == event
     reset = decode_message(encode_message(reset_message("death")))
     assert reset.reason == "death"  # type: ignore[attr-defined]
+
+
+def test_load_macro_message_roundtrip_sorts_events() -> None:
+    decoded = decode_message(
+        encode_message(
+            load_macro_message(
+                [Event(20, "release"), Event(10, "press")],
+                metadata={"level_name": "test"},
+            )
+        )
+    )
+
+    assert isinstance(decoded, LoadMacroCommand)
+    assert decoded.events == [Event(10, "press"), Event(20, "release")]
+    assert decoded.metadata == {"level_name": "test"}
+
+
+def test_diagnostic_message_roundtrip() -> None:
+    decoded = decode_message(
+        encode_message(
+            diagnostic_message(
+                "macro_event_applied",
+                tick=12,
+                data={"event_index": 0, "intended_tick": 10, "applied_tick": 12},
+            )
+        )
+    )
+
+    assert isinstance(decoded, BridgeDiagnostic)
+    assert decoded.kind == "macro_event_applied"
+    assert decoded.tick == 12
+    assert decoded.data["applied_tick"] == 12
 
 
 def test_protocol_rejects_bad_version() -> None:

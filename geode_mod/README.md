@@ -4,8 +4,9 @@ This folder contains the first real Geode bridge implementation.
 
 The mod starts a local-only TCP server on `127.0.0.1:29430`, sends one
 observation message per gameplay update while a Python client is connected,
-accepts `action` and `reset` messages, and applies received jump press/release
-events on the next game update.
+accepts `action`, `load_macro`, and `reset` messages, and can either apply
+live-sent jump press/release events on the next game update or replay a loaded
+macro inside the mod by attempt tick.
 
 The Python dummy server still exists for protocol tests, but the live workflow
 now connects to the Geode mod directly.
@@ -36,7 +37,11 @@ The current Geode mod:
 1. Send one `observation` message per physics tick.
 2. Receive `action` messages from Python.
 3. Apply `press` / `release` on the next gameplay update after receipt.
-4. Receive `reset` messages and restart the attempt.
+4. Receive `load_macro` messages and store a complete macro for deterministic
+   replay.
+5. Arm the loaded macro after reset and apply due events from inside the mod by
+   attempt tick.
+6. Receive `reset` messages and restart the attempt.
 
 Trace saving is currently handled on the Python side.
 
@@ -113,6 +118,34 @@ p1
 p2
 ```
 
+## Load Macro Message
+
+```json
+{
+  "version": 1,
+  "type": "load_macro",
+  "events": [
+    {
+      "tick": 20,
+      "kind": "press",
+      "player": "p1"
+    },
+    {
+      "tick": 30,
+      "kind": "release",
+      "player": "p1"
+    }
+  ],
+  "metadata": {
+    "level_name": "local_test"
+  }
+}
+```
+
+The mod stores the macro as inactive when it is loaded. A later `reset` arms the
+macro from event zero, so the queued macro does not accidentally affect the
+currently running attempt before the trial starts.
+
 ## Reset Message
 
 ```json
@@ -130,7 +163,7 @@ p2
   "version": 1,
   "type": "ack",
   "tick": 123,
-  "message": "action queued"
+  "message": "macro loaded"
 }
 ```
 
@@ -141,6 +174,29 @@ p2
   "message": "invalid action"
 }
 ```
+
+## Diagnostic Messages
+
+Queued replay emits non-trace diagnostics such as:
+
+```json
+{
+  "version": 1,
+  "type": "diagnostic",
+  "kind": "macro_event_applied",
+  "tick": 20,
+  "data": {
+    "event_index": 0,
+    "intended_tick": 20,
+    "applied_tick": 20,
+    "kind": "press",
+    "player": "p1"
+  }
+}
+```
+
+Python stores these in `summary.json`. They are intentionally separate from the
+canonical trace JSONL rows.
 
 ## Python Dummy Check
 
@@ -214,6 +270,10 @@ macro:
 .\.venv\Scripts\python.exe scripts\run_geode_replay_check.py examples\macros\single_jump.json --trials 5 --max-observations 600
 ```
 
+By default, this loads the full macro into the mod before the trials and lets
+the mod apply events by attempt tick. To run the older live-send path for smoke
+testing, add `--live-send`.
+
 Other tiny checked-in macros:
 
 ```text
@@ -225,10 +285,11 @@ examples/macros/short_repeated_clicks.json
 The replay-check script:
 
 1. Connects to the live bridge on `127.0.0.1:29430`.
-2. Sends a reset and waits for a fresh tick-0 observation before each trial.
-3. Runs the same macro for each trial.
-4. Saves per-trial traces under `artifacts/replay_check_<timestamp>/`.
-5. Writes `summary.json` with deterministic replay metrics.
+2. Loads the macro into the mod once, unless `--live-send` is set.
+3. Sends a reset and waits for a fresh tick-0 observation before each trial.
+4. Collects observations while the mod-side macro queue applies due events.
+5. Saves per-trial traces under `artifacts/replay_check_<timestamp>/`.
+6. Writes `summary.json` with deterministic replay metrics.
 
 Important summary fields:
 
@@ -241,6 +302,10 @@ success_rate
 survival_rate
 input_state_mismatch_ticks
 input_latency_by_event
+first_movement_ticks
+zero_movement_step_counts
+double_movement_step_counts
+macro_application_by_event
 ```
 
 Keep these live checks on local/offline levels only. `artifacts/` is ignored, so

@@ -12,10 +12,12 @@ from gd_human_model.events import Event
 
 from gd_env.protocol import (
     BridgeObservation,
+    LoadMacroCommand,
     ResetCommand,
     action_message,
     ack_message,
     decode_message,
+    diagnostic_message,
     encode_message,
     error_message,
     observation_message,
@@ -98,12 +100,41 @@ class DummyGeometryDashServer:
         tick = 0
         input_down = False
         pending_actions: list[Event] = []
+        loaded_macro: list[Event] = []
+        macro_loaded = False
+        macro_active = False
+        next_macro_event_index = 0
         buffer = b""
 
         while not self._stop.is_set() and tick < self.max_ticks:
             for event in pending_actions:
-                input_down = event.kind == "press"
+                if event.player == "p1":
+                    input_down = event.kind == "press"
             pending_actions.clear()
+
+            while (
+                macro_active
+                and next_macro_event_index < len(loaded_macro)
+                and loaded_macro[next_macro_event_index].tick <= tick
+            ):
+                event = loaded_macro[next_macro_event_index]
+                if event.player == "p1":
+                    input_down = event.kind == "press"
+                self._send(
+                    connection,
+                    diagnostic_message(
+                        "macro_event_applied",
+                        tick=tick,
+                        data={
+                            "event_index": next_macro_event_index,
+                            "intended_tick": event.tick,
+                            "applied_tick": tick,
+                            "kind": event.kind,
+                            "player": event.player,
+                        },
+                    ),
+                )
+                next_macro_event_index += 1
 
             observation = BridgeObservation(
                 tick=tick,
@@ -120,11 +151,22 @@ class DummyGeometryDashServer:
             self._send(connection, observation_message(observation))
 
             time.sleep(self.tick_interval_seconds)
-            buffer, reset_requested, new_actions = self._drain_commands(connection, buffer, tick)
+            buffer, reset_requested, new_actions, new_macro = self._drain_commands(
+                connection,
+                buffer,
+                tick,
+            )
+            if new_macro is not None:
+                loaded_macro = new_macro
+                macro_loaded = True
+                macro_active = False
+                next_macro_event_index = 0
             if reset_requested:
                 tick = 0
                 input_down = False
                 pending_actions.clear()
+                macro_active = macro_loaded
+                next_macro_event_index = 0
                 continue
             pending_actions.extend(new_actions)
             tick += 1
@@ -134,9 +176,10 @@ class DummyGeometryDashServer:
         connection: socket.socket,
         buffer: bytes,
         current_tick: int,
-    ) -> tuple[bytes, bool, list[Event]]:
+    ) -> tuple[bytes, bool, list[Event], list[Event] | None]:
         reset_requested = False
         actions: list[Event] = []
+        loaded_macro: list[Event] | None = None
 
         while True:
             readable, _, _ = select.select([connection], [], [], 0.0)
@@ -147,9 +190,9 @@ class DummyGeometryDashServer:
             except BlockingIOError:
                 break
             except OSError:
-                return b"", reset_requested, actions
+                return b"", reset_requested, actions, loaded_macro
             if not chunk:
-                return b"", reset_requested, actions
+                return b"", reset_requested, actions, loaded_macro
             buffer += chunk
 
             while b"\n" in buffer:
@@ -165,13 +208,16 @@ class DummyGeometryDashServer:
                 if isinstance(message, Event):
                     actions.append(message)
                     self._send(connection, ack_message("action queued", tick=current_tick))
+                elif isinstance(message, LoadMacroCommand):
+                    loaded_macro = message.events
+                    self._send(connection, ack_message("macro loaded", tick=current_tick))
                 elif isinstance(message, ResetCommand):
                     reset_requested = True
                     self._send(connection, ack_message("reset queued", tick=current_tick))
                 else:
                     self._send(connection, error_message("unexpected client message"))
 
-        return buffer, reset_requested, actions
+        return buffer, reset_requested, actions, loaded_macro
 
     @staticmethod
     def _send(connection: socket.socket, message: dict[str, object]) -> None:

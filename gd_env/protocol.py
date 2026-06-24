@@ -6,12 +6,20 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, Mapping
 
-from gd_human_model.events import Event
+from gd_human_model.events import Event, sort_events
 from gd_trace.macro_schema import event_from_mapping, event_to_dict
 from gd_trace.trace_schema import TraceRow
 
 PROTOCOL_VERSION = 1
-MessageType = Literal["observation", "action", "reset", "ack", "error"]
+MessageType = Literal[
+    "observation",
+    "action",
+    "load_macro",
+    "reset",
+    "ack",
+    "error",
+    "diagnostic",
+]
 
 
 class ProtocolError(ValueError):
@@ -105,6 +113,19 @@ class ResetCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class LoadMacroCommand:
+    """A complete macro to store in the mod for deterministic replay."""
+
+    events: list[Event]
+    metadata: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "events", sort_events(self.events))
+        if not isinstance(self.metadata, dict):
+            raise ProtocolError("load_macro.metadata must be a dict")
+
+
+@dataclass(frozen=True, slots=True)
 class AckMessage:
     """Positive response from the mod or dummy server."""
 
@@ -117,6 +138,40 @@ class ErrorMessage:
     """Error response from the mod or dummy server."""
 
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class BridgeDiagnostic:
+    """Non-trace bridge diagnostic emitted during live/manual checks."""
+
+    kind: str
+    tick: int | None
+    data: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if not self.kind:
+            raise ProtocolError("diagnostic.kind must be non-empty")
+        if self.tick is not None and self.tick < 0:
+            raise ProtocolError("diagnostic.tick must be non-negative or null")
+        if not isinstance(self.data, dict):
+            raise ProtocolError("diagnostic.data must be a dict")
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "BridgeDiagnostic":
+        tick = data.get("tick")
+        if tick is not None and (isinstance(tick, bool) or not isinstance(tick, int)):
+            raise ProtocolError("diagnostic.tick must be an int or null")
+        diagnostic_data = data.get("data", {})
+        if not isinstance(diagnostic_data, dict):
+            raise ProtocolError("diagnostic.data must be a dict")
+        return cls(
+            kind=_as_str(data, "kind"),
+            tick=tick,
+            data=dict(diagnostic_data),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def observation_message(observation: BridgeObservation) -> dict[str, Any]:
@@ -132,6 +187,19 @@ def action_message(event: Event) -> dict[str, Any]:
         "version": PROTOCOL_VERSION,
         "type": "action",
         "event": event_to_dict(event),
+    }
+
+
+def load_macro_message(
+    events: list[Event],
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "version": PROTOCOL_VERSION,
+        "type": "load_macro",
+        "events": [event_to_dict(event) for event in sort_events(events)],
+        "metadata": dict(metadata or {}),
     }
 
 
@@ -152,6 +220,21 @@ def ack_message(message: str, tick: int | None = None) -> dict[str, Any]:
     }
 
 
+def diagnostic_message(
+    kind: str,
+    *,
+    tick: int | None = None,
+    data: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "version": PROTOCOL_VERSION,
+        "type": "diagnostic",
+        "kind": kind,
+        "tick": tick,
+        "data": dict(data or {}),
+    }
+
+
 def error_message(message: str) -> dict[str, Any]:
     return {
         "version": PROTOCOL_VERSION,
@@ -167,7 +250,17 @@ def encode_message(message: Mapping[str, Any]) -> str:
     return json.dumps(message, separators=(",", ":"), sort_keys=True) + "\n"
 
 
-def decode_message(line: str) -> BridgeObservation | Event | ResetCommand | AckMessage | ErrorMessage:
+def decode_message(
+    line: str,
+) -> (
+    BridgeObservation
+    | Event
+    | LoadMacroCommand
+    | ResetCommand
+    | AckMessage
+    | ErrorMessage
+    | BridgeDiagnostic
+):
     """Decode one newline-delimited JSON protocol message."""
 
     try:
@@ -187,6 +280,17 @@ def decode_message(line: str) -> BridgeObservation | Event | ResetCommand | AckM
         return BridgeObservation.from_mapping(observation_data)
     if message_type == "action":
         return event_from_mapping(data.get("event"))
+    if message_type == "load_macro":
+        events_data = data.get("events")
+        if not isinstance(events_data, list):
+            raise ProtocolError("load_macro message must contain events list")
+        metadata = data.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ProtocolError("load_macro.metadata must be a dict")
+        return LoadMacroCommand(
+            events=[event_from_mapping(event_data) for event_data in events_data],
+            metadata=dict(metadata),
+        )
     if message_type == "reset":
         return ResetCommand(reason=_as_str(data, "reason", default="requested"))
     if message_type == "ack":
@@ -196,6 +300,8 @@ def decode_message(line: str) -> BridgeObservation | Event | ResetCommand | AckM
         return AckMessage(tick=tick, message=_as_str(data, "message"))
     if message_type == "error":
         return ErrorMessage(message=_as_str(data, "message"))
+    if message_type == "diagnostic":
+        return BridgeDiagnostic.from_mapping(data)
 
     raise ProtocolError(f"unsupported message type: {message_type}")
 
@@ -205,7 +311,15 @@ def _validate_message_envelope(message: Mapping[str, Any]) -> None:
     if version != PROTOCOL_VERSION:
         raise ProtocolError(f"unsupported protocol version: {version}")
     message_type = message.get("type")
-    if message_type not in ("observation", "action", "reset", "ack", "error"):
+    if message_type not in (
+        "observation",
+        "action",
+        "load_macro",
+        "reset",
+        "ack",
+        "error",
+        "diagnostic",
+    ):
         raise ProtocolError("message.type is invalid")
 
 

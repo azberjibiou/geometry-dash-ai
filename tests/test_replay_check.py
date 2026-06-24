@@ -2,6 +2,7 @@ from gd_human_model import Event
 from gd_trace.replay_check import (
     detect_input_transitions,
     summarize_replay_check,
+    summarize_macro_applications,
 )
 from gd_trace.trace_schema import TraceRow
 from tests.test_trace_io import make_row
@@ -122,3 +123,79 @@ def test_detect_input_transitions_includes_initial_pressed_state() -> None:
         (0, "press"),
         (2, "release"),
     ]
+
+
+def test_replay_summary_reports_movement_step_diagnostics() -> None:
+    trace = [
+        row(0, x=0.0),
+        row(1, x=0.0),
+        row(2, x=1.0),
+        row(3, x=3.0),
+        row(4, x=4.0),
+    ]
+
+    summary = summarize_replay_check([trace], [])
+
+    assert summary.first_movement_ticks == [2]
+    assert summary.zero_movement_step_counts == [1]
+    assert summary.double_movement_step_counts == [1]
+
+
+def test_replay_summary_reports_macro_application_diagnostics() -> None:
+    macro = [Event(2, "press"), Event(5, "release")]
+    diagnostics_by_trial = [
+        [
+            {
+                "kind": "macro_event_applied",
+                "tick": 2,
+                "data": {
+                    "event_index": 0,
+                    "intended_tick": 2,
+                    "applied_tick": 2,
+                },
+            },
+            {
+                "kind": "macro_event_applied",
+                "tick": 5,
+                "data": {
+                    "event_index": 1,
+                    "intended_tick": 5,
+                    "applied_tick": 5,
+                },
+            },
+        ],
+        [
+            {
+                "kind": "macro_event_applied",
+                "tick": 3,
+                "data": {
+                    "event_index": 0,
+                    "intended_tick": 2,
+                    "applied_tick": 3,
+                },
+            },
+            {
+                "kind": "macro_event_applied",
+                "tick": 6,
+                "data": {
+                    "event_index": 1,
+                    "intended_tick": 5,
+                    "applied_tick": 6,
+                },
+            },
+        ],
+    ]
+
+    summaries = summarize_macro_applications(macro, diagnostics_by_trial)
+
+    assert summaries[0].applied_ticks_by_trial == [2, 3]
+    assert summaries[0].latency_frames_by_trial == [0, 1]
+    assert summaries[0].mean_frames == 0.5
+    assert summaries[1].applied_ticks_by_trial == [5, 6]
+
+    summary = summarize_replay_check(
+        [[row(0), row(1)], [row(0), row(1)]],
+        macro,
+        diagnostics_by_trial=diagnostics_by_trial,
+    )
+    assert summary.macro_application_by_event[0].max_frames == 1
