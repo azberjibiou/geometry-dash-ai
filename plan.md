@@ -1,10 +1,18 @@
-# Geometry Dash Human-like Practice-Learning AI Plan
+# Geometry Dash Human-like RL Practice Agent Plan
 
 ## 0. Project Goal
 
-Build an AI system that plays Geometry Dash in a **human-like** way, can practice a specific level over many attempts, and can build level-specific muscle memory while keeping a reusable general policy.
+Build a **level-specific practicing RL agent** for Geometry Dash. The agent
+should repeatedly attempt one small local/offline level, die, observe progress
+and trace information, update its policy or practice memory, and improve under
+a stochastic human mock model.
 
-The goal is **not** to build a perfect bot.
+The RL policy should output intended actions or intended press/release events.
+Those intended outputs must pass through the human model before reaching
+Geometry Dash.
+
+The goal is **not** to build a perfect bot, a leaderboard bot, or a
+zero-shot Geometry Dash generalist.
 
 The goal is to model a player who:
 
@@ -15,13 +23,13 @@ The goal is to model a player who:
 - becomes less consistent when clicks are too close together,
 - may become slightly less precise after long gaps,
 - can be configured as Beginner / Intermediate / Advanced / Top Player,
-- can run many practice attempts to measure learning progress, clear rate, playtime, attempts, and death distribution,
+- can run many RL practice attempts to measure learning progress, clear rate, playtime, attempts, and death distribution,
 - can remember level-specific timing patterns after practice, like human muscle memory.
 
 Final use case:
 
 ```text
-Given a Geometry Dash level, a general agent, and a human profile,
+Given one local/offline Geometry Dash level, an RL policy, and a human profile,
 practice the level over repeated attempts and report:
 - attempts to first clear
 - playtime to first clear
@@ -34,36 +42,45 @@ practice the level over repeated attempts and report:
 - sensitivity to reaction delay and timing variance
 ```
 
+Imitation learning is optional support only. It can be used as a bootstrap,
+diagnostic baseline, data tool, or pretraining method, but it does not define
+the agent architecture.
+
 ---
 
 ## 1. Core Principle
 
-The project should separate four layers:
+The project should separate five layers:
 
 ```text
 Geometry Dash Environment
-        ↓
-General AI Policy
-        ↓
-Level Memory / Practice Adapter
-        ↓
-Human-like Input Wrapper
+        -> Observation / Trace Interface
+        -> RL Policy / Practice Learner
+        -> Level Memory / Practice Adapter
+        -> Human-like Input Wrapper
+        -> Reward / Update Loop
 ```
 
-The general AI policy should decide what it *currently thinks* should be done from observation.
+The RL policy should decide what it *intends* to do from observation and
+practice state.
 
 The level memory / practice adapter should use previous attempts on the same level to adjust timing, prefer learned event windows, and build muscle memory.
 
 The human wrapper should decide when that intended input actually reaches the game.
 
+The reward/update loop should turn trace, death, progress, clear status, and
+practice memory changes into learning signals for the next attempt.
+
 This separation is important because we want to distinguish:
 
 ```text
-The general AI understands the situation
+The RL policy selected an intended action/event
 vs.
-The level memory has learned this exact timing
+The level memory has learned this level-specific timing window
 vs.
-The human-like player fails to execute it precisely
+The human-like player executed it imperfectly
+vs.
+The resulting trace/death/progress changed future practice behavior
 ```
 
 ---
@@ -101,10 +118,11 @@ The human-like player fails to execute it precisely
                |
                v
 +-----------------------------+
-| General AI Policy           |
+| RL Policy / Practice        |
+| Learner                     |
 |                             |
 | input: delayed observation  |
-| output: candidate events    |
+| output: intended events     |
 |                             |
 | events: press / release     |
 +--------------+--------------+
@@ -135,6 +153,16 @@ The human-like player fails to execute it precisely
                v
 +-----------------------------+
 | Geometry Dash               |
++-----------------------------+
+               |
+               | trace, death, progress, reward
+               v
++-----------------------------+
+| Practice Update Loop        |
+|                             |
+| - computes reward           |
+| - updates RL policy/memory  |
+| - schedules next attempt    |
 +-----------------------------+
 ```
 
@@ -933,86 +961,122 @@ Higher miss_prob → more random deaths.
 
 ---
 
-### Phase 7 — Imitation Learning on One Level
+### Phase 7 - Practice Environment and Reward Loop
 
 Goal:
 
-Train a policy to imitate a recorded playthrough on a single short level.
+Build the repeated-attempt RL training loop around one small local/offline
+level.
 
-Initial policy:
-
-```text
-input: last 4 grayscale frames + progress
-output:
-  - press_event probability
-  - release_event probability
-```
-
-Training data:
+Core loop:
 
 ```text
-recorded frame sequence
-recorded input event sequence
+observation
+-> RL policy
+-> intended action/event
+-> human mock model
+-> executed input
+-> Geometry Dash
+-> trace, death, progress, reward
+-> RL update / practice memory
 ```
 
-Important:
-
-Because of visual and motor delay, labels should be shifted.
-
-If total delay is:
+Near-term deliverables:
 
 ```text
-D = visual_delay_frames + motor_delay_frames
+gd_rl/
+  env.py
+  rewards.py
+  attempt_runner.py
+  practice_loop.py
+  rollout.py
+  tests/
 ```
 
-then frame at tick `t` should learn to predict events needed around tick `t + D`.
+Implement:
+
+- `PracticeEnv` or equivalent wrapper over the existing bridge/replay tools.
+- `RewardComputer` for progress, survival, death, and clear signals.
+- `AttemptResult` with trace path, intended events, executed events, final
+  percent, death tick/percent, clear status, and reward totals.
+- Repeated-attempt runner that resets after death or completion.
+- Event/action logging that preserves intended policy output separately from
+  humanized executed input.
+- Local/offline level guards so training cannot accidentally target online or
+  leaderboard use.
+
+Initial reward sketch:
+
+```text
++ progress_delta reward
++ best_progress bonus
++ section survival bonus
++ clear bonus
+- death penalty scaled by lost opportunity
+- optional excessive/illegal input penalty
+```
 
 Success criterion:
 
 ```text
-The learned policy can reproduce meaningful progress on the same level.
+A scripted or random policy can run many attempts on the same local/offline
+level through the human wrapper, save intended/executed event logs and traces,
+compute rewards, and produce a practice summary.
 ```
-
-Do not require zero-shot generalization yet.
 
 ---
 
-### Phase 8 — Event Window Labels
+### Phase 8 - Minimal RL Agent on One Local Level
 
 Goal:
 
-Avoid overly brittle single-tick labels.
+Train the first small RL policy under the stochastic human mock model.
 
-Instead of only labeling the exact recorded press tick, estimate a valid event window.
-
-Possible labels:
+Initial action space options:
 
 ```text
-is_press_window
-is_release_window
-frames_to_next_press
-frames_to_next_release
+Option A: discrete intended button state per tick
+  no_op | press | release
+
+Option B: event proposal
+  no_event | press_now | release_now
+
+Option C: short timing adjustment around known candidate windows
+  shift earlier | keep | shift later | widen/search
 ```
 
-Why:
+Start with the simplest action space that can drive the selected local test
+level. The policy may use internal state, progress/x-position, current
+input_down, and compact visual features. Screenshot-only learning is not
+required for the first RL loop.
 
-In Geometry Dash, many jumps allow a small range of valid click timings.
+Training approach:
 
-Single-tick supervised labels can incorrectly mark other valid ticks as negative.
+```text
+Use a small, local, repeatable algorithm first:
+- random/search baseline for reward sanity
+- cross-entropy method or policy-gradient spike
+- simple replay/practice memory for successful sections
+```
+
+Do not optimize for zero-shot generalization. Do not target online levels.
+Do not aim for perfect deterministic bot behavior.
 
 Success criterion:
 
 ```text
-Training becomes less brittle and the policy tolerates small timing variations better.
+On a fixed local/offline level, repeated RL practice improves average progress
+or best progress under the same HumanProfile compared with the initial policy.
 ```
 
 ---
 
-### Phase 9 — Level Memory / Muscle Memory Adapter
+### Phase 9 - Level Memory / Muscle Memory Adapter
 
 Goal:
 
-Make repeated attempts improve performance on the same level.
+Make repeated attempts improve performance on the same level by storing
+robust timing windows and section knowledge.
 
 Implement:
 
@@ -1028,7 +1092,7 @@ PracticeUpdater
 The adapter should combine:
 
 ```text
-general policy output
+RL policy output
 + progress / x-position
 + learned event windows
 + learned macro fragments
@@ -1042,32 +1106,41 @@ The updater should consume:
 trace
 intended events
 actual humanized events
+reward terms
 death position
 clear/failure result
 ```
 
 and update the level memory after each attempt.
 
+Important:
+
+```text
+The memory should store timing windows, confidence, correction history, and
+section stats, not only one exact macro.
+```
+
 Success criterion:
 
 ```text
-On a fixed level, the agent improves over repeated attempts
-without hard-coding a final exact macro by hand.
+On a fixed level, the agent improves over repeated attempts without
+hard-coding a final exact macro by hand.
 ```
 
 ---
 
-### Phase 10 — Practice Learning Evaluation
+### Phase 10 - Practice Learning Evaluation
 
 Goal:
 
-Measure how well the general agent learns a specific level through practice.
+Measure how well the RL agent learns a specific level through practice.
 
 For each level and human profile:
 
 ```text
 run repeated practice attempts
-store traces, deaths, memory updates, and clears
+store traces, intended events, executed events, rewards, deaths, memory updates,
+and clears
 ```
 
 Report:
@@ -1084,6 +1157,7 @@ death_histogram
 death_histogram_over_time
 hardest_sections
 section_success_rate_over_time
+reward_curve
 memory_confidence_by_section
 sensitivity_to_delay
 sensitivity_to_std
@@ -1092,14 +1166,47 @@ sensitivity_to_close_amp
 
 Do not require a single difficulty score for early versions.
 
-Use attempts, playtime, progress, and consistency as the primary measurements.
+Use attempts, playtime, progress, reward, and consistency as the primary
+measurements.
 
 Success criterion:
 
 ```text
 Repeated practice produces a visible learning curve:
-best progress increases, repeated deaths move later or disappear,
-and clear rate improves after memory is learned.
+best progress increases, repeated deaths move later or disappear, reward
+improves, and clear rate improves after memory is learned.
+```
+
+---
+
+### Optional Support Track - Imitation and Event Windows
+
+Goal:
+
+Keep imitation learning useful as support infrastructure without making it the
+main agent architecture.
+
+Allowed uses:
+
+- Bootstrap an initial policy from a local/offline demonstration.
+- Produce diagnostic baselines for event decoding and replay.
+- Estimate valid event windows from recorded attempts.
+- Pretrain visual features before RL practice.
+- Compare RL-learned timing windows against demonstration timing.
+
+Not allowed as the main objective:
+
+- A standalone macro-prediction policy treated as the final agent.
+- A replay bot that bypasses the human mock model.
+- A zero-shot generalization benchmark.
+- Online-level or leaderboard-focused training.
+
+Success criterion:
+
+```text
+Imitation tools can help initialize or inspect practice, but the primary
+training result is still measured by repeated RL attempts through the human
+model on one fixed local/offline level.
 ```
 
 ---
@@ -1255,12 +1362,13 @@ Do not do these early:
 
 ```text
 1. Do not implement full Geometry Dash physics.
-2. Do not train RL immediately.
+2. Do not start large-scale or open-ended RL before the local practice loop works.
 3. Do not support all game modes.
-4. Do not support online levels at scale.
+4. Do not support online levels or leaderboard use.
 5. Do not optimize for speed before correctness.
 6. Do not use the bot for online leaderboard submission.
-7. Do not require zero-shot generalization to unseen levels before the practice-learning loop works.
+7. Do not require zero-shot generalization to unseen levels.
+8. Do not treat imitation learning or macro prediction as the main architecture.
 ```
 
 ---
@@ -1277,9 +1385,11 @@ Mitigation:
 Build deterministic replay tests before training.
 ```
 
-### Risk 2 — Supervised labels are ambiguous
+### Risk 2 — Optional supervised labels are ambiguous
 
-There may be multiple valid click frames, but the dataset contains only one.
+There may be multiple valid click frames, but an imitation dataset contains
+only one. This matters for bootstrap and diagnostics, but it should not define
+the practicing RL objective.
 
 Mitigation:
 
@@ -1376,15 +1486,15 @@ Current local target:
 
 ```text
 Phase 7:
-Imitation Learning on One Level
+Practice Environment and Reward Loop
 ```
 
 Reason:
 
 The non-neural Phase 6 pipeline now works end-to-end with centered timing
-noise, queued live Geode replay, and profile-sensitive summaries. The next
-milestone is to train a small policy to imitate one short level from aligned
-frame/progress/input data.
+noise, queued live Geode replay, profile-sensitive summaries, and optional
+imitation support tools. The next milestone is to wrap these pieces in a
+repeated-attempt RL practice loop for one small local/offline level.
 
 Phase 4 implementation:
 
@@ -1813,132 +1923,322 @@ Interpretation:
   split profiles such as PracticedBeginner and UnpracticedBeginner.
 ```
 
-Next target:
+Superseded imitation target (support-only historical note):
+
+The following block records the previous imitation-learning direction. It is
+kept because the implemented dataset, baseline, and decoder tools may still be
+useful for bootstrap and diagnostics. It is no longer the main project target.
 
 ```text
-Phase 7:
-Imitation Learning on One Level
+Previous direction:
+  Phase 7 imitation learning on one local/offline level.
 
-Decision:
-Now that replay, trace metadata, visual frame capture, and the non-neural
-humanized macro pipeline are stable enough, start the first small imitation
-learning spike on one local/offline level.
-Do not implement practice memory yet.
+Current interpretation:
+  This work is support infrastructure only. The dataset builder, tiny baseline,
+  decoder, and predicted-macro export can help bootstrap or diagnose the RL
+  practice agent, but they are not the main objective.
 
-Immediate Phase 7 goal:
-train a simple policy to imitate a recorded playthrough on one short local
-level using aligned frame/progress/input data.
-
-Initial implementation plan:
-1. Create or choose a small dataset fixture.
-   - Use local/offline levels only.
-   - Use screenshot frames already supported by Phase 5.
-   - Use macro/input events aligned to bridge ticks.
-   - Keep generated frames, traces, and datasets under ignored artifacts/.
-
-2. Add dataset preparation utilities.
-   - load frame manifests and trace rows
-   - align frames, progress, input_down, and event labels
-   - produce train/validation splits for one short level
-
-3. Add a minimal imitation policy.
-   Initial input:
-   - last 4 grayscale frames
-   - progress
-   - current input_down
-
-   Initial output:
-   - press_event probability
-   - release_event probability
-
-4. Handle label shifting carefully.
-   For policy training, frame at tick t should learn events needed around
-   t + total_delay_frames when simulating perception and motor delay.
-
-5. Add synthetic/unit tests first.
-   - event label alignment
-   - delayed-label shifting
-   - dataset windowing
-   - deterministic train/validation split
-
-6. Run a small live/manual replay check.
-   The learned policy does not need zero-shot generalization yet. It only needs
-   to reproduce meaningful progress on the same short level.
-
-Phase 7 success criterion:
-The learned policy can reproduce meaningful progress on one practiced local
-level, using aligned visual/progress/input observations, without adding
-practice memory yet.
+Current main target:
+  Phase 7 practice environment and reward loop.
 ```
 
 ---
 
-## 13. Prompt for Next Codex Chat
+## 13. Optional Imitation Support Log
 
-Copy this into the next Codex chat:
+This section records support infrastructure that already exists. These tools
+can bootstrap, inspect, or compare RL practice, but they should not define the
+main agent architecture.
+
+Latest implemented Phase 7 work:
 
 ```text
-We are in the geometry_dash_ai repo. Please continue from plan.md at Phase 7:
-Imitation Learning on One Level.
+Dataset preparation layer is implemented.
 
-Current status:
-- Phase 1 through Phase 6 are implemented.
-- Phase 6 added target-centered humanized macro replay through the live Geode
-  bridge.
-- The Geode mod builds successfully with:
-  C:\Program Files\CMake\bin\cmake.exe
-- The replay script uses mod-side queued macro replay by default.
-- Screenshot capture is implemented in scripts/capture_geode_frames.py.
-- Window capture helpers live in gd_capture/screen_capture.py.
-- Humanized macro replay is implemented in scripts/run_humanized_geode_macro.py.
-- Macro humanization is implemented in gd_human_model/macro_humanizer.py.
-- Humanized run summaries live in gd_trace/humanized_run.py.
-- artifacts/ is ignored and should remain local-only.
+Added:
+  gd_imitation/dataset.py
+    - DatasetConfig
+    - ImitationSample
+    - build_imitation_samples(...)
+    - load_imitation_samples(...)
+    - load_samples_jsonl(...)
+    - deterministic train/validation splits
 
-Latest live validation:
-- Triple-spike local/offline fixture:
-  raw centered macro press 192, release 212 cleared.
-  target-mode humanized profile sweep, 10 attempts each:
-    TopPlayer: 10/10 clears, timing std 0.71 frames
-    Advanced: 10/10 clears, timing std 1.37 frames
-    Intermediate: 10/10 clears, timing std 2.78 frames
-    Beginner: 9/10 clears, timing std 4.49 frames
+  scripts/capture_geode_frames.py
+    - now writes same-run trace.jsonl next to manifest.jsonl
+    - summary.json includes trace_path and trace_row_count
 
-Interpretation:
-- Phase 6 is complete enough to proceed.
-- The default macro humanization mode is target-centered: macro ticks are desired
-  click timings and human error is centered around them.
-- decision timing mode remains available for future policy-decision simulations.
-- The current Beginner profile behaves like a practiced player with noisy motor
-  execution, not an unpracticed sight-reading beginner.
-- Do not implement practice memory yet.
+  scripts/prepare_imitation_dataset.py
+    - manifest.jsonl + trace.jsonl + macro.json -> samples.jsonl
+    - writes split.json and summary.json
 
-Task:
-Implement Phase 7: imitation learning on one short local/offline level.
+  gd_imitation/image_dataset.py
+    - loads samples.jsonl
+    - reads referenced BMP frames without third-party image dependencies
+    - converts frames to normalized grayscale
+    - downsamples directly to fixed size
+    - caches frames across stacked samples
+    - pads short initial frame stacks when requested
+    - exposes scalar features:
+        normalized progress
+        input_down
+    - exposes labels:
+        press_event
+        release_event
+```
 
-Please:
-1. Inspect the existing gd_capture, gd_trace, gd_env, gd_human_model, and
-   script code before editing.
-2. Add dataset preparation utilities that load frame manifests and traces,
-   align frame/progress/input/event labels, and create deterministic splits.
-3. Add event-label shifting for delayed perception/motor execution.
-4. Add a minimal one-level imitation policy.
-   Initial input:
-   - last 4 grayscale frames
-   - progress
-   - current input_down
-   Initial output:
-   - press_event probability
-   - release_event probability
-5. Add focused synthetic tests for frame/trace alignment, delayed-label
-   shifting, dataset windowing, and deterministic splitting.
-6. Run a small local/offline manual check if a suitable captured dataset and
-   Geometry Dash level are available.
+Verification:
+
+```text
+pytest: 94 passed
+
+Real local/offline smoke artifact:
+  capture:
+    artifacts/phase7_single_jump_capture
+
+  dataset:
+    artifacts/phase7_single_jump_dataset
+
+  macro:
+    examples/macros/single_jump.json
+
+  capture result:
+    frames: 120
+    trace rows: 120
+    ticks: 0..119
+    dead: false
+    final_percent: about 12.9
+    validation_ok: true
+
+  dataset result:
+    samples: 120
+    train: 96
+    validation: 24
+    press label tick: 20
+    release label tick: 30
+
+  image loader smoke:
+    samples loaded: 120
+    frame stack shape: 4 x 12 x 16
+    press labels: 1
+    release labels: 1
+    positive label ticks: [20, 30]
+```
+
+Important caveat:
+
+```text
+The current single_jump dataset is good for proving the pipeline, but it is too
+small for meaningful model validation.
+
+The default contiguous split places the positive labels in the train set only
+because the press/release happen early. For real training, either:
+  - capture a longer level with more events,
+  - capture multiple attempts,
+  - use shuffled splits for small smoke datasets,
+  - or build a small balanced/stratified split helper later.
+```
+
+Additional implemented Phase 7 work:
+
+```text
+First tiny PyTorch imitation baseline is implemented.
+
+Added:
+  gd_imitation/baseline.py
+    - tiny image-backed MLP baseline
+    - train/validation loss and binary event metrics
+    - writes metrics.json and predictions.jsonl
+    - optional checkpoint saving
+
+  scripts/train_imitation_baseline.py
+    - trains the baseline from a prepared dataset directory
+    - writes outputs under a caller-provided artifacts/ directory
+
+  gd_imitation/decoder.py
+    - decodes per-tick press/release probabilities into Event objects
+    - thresholding plus non-max suppression
+    - button-state legality filtering
+    - minimum event spacing
+    - event-level timing metrics
+
+  scripts/predict_imitation_macro.py
+    - decodes an existing predictions.jsonl
+    - can run a saved tiny-baseline checkpoint over a prepared dataset
+    - writes predicted_macro.json, prediction_summary.json, and
+      decoded_events.jsonl
+    - exports through the canonical Macro schema
+```
+
+Verification:
+
+```text
+pytest: 107 passed
+
+Smoke prediction artifact:
+  input:
+    artifacts/imitation_baseline_smoke/predictions.jsonl
+
+  output:
+    artifacts/imitation_baseline_smoke/predicted_macro/predicted_macro.json
+    artifacts/imitation_baseline_smoke/predicted_macro/prediction_summary.json
+    artifacts/imitation_baseline_smoke/predicted_macro/decoded_events.jsonl
+
+  decoded events:
+    press tick: 20
+    release tick: 30
+
+  macro validation:
+    events: 2
+    presses: 1
+    releases: 1
+    first_tick: 20
+    last_tick: 30
+```
+
+Optional imitation follow-up:
+
+```text
+Replay artifacts/imitation_baseline_smoke/predicted_macro/predicted_macro.json
+through the queued Geode replay checker.
+
+Record:
+  final_percent
+  death_tick/death_percent if any
+  progress delta versus the source demonstration
+  event timing error versus the source macro
+
+Do not treat this as the main project path.
+Do not require zero-shot generalization yet.
+Do not use online levels, leaderboard submission, or generated artifacts in Git.
+```
+
+Historical prompt for optional imitation follow-up:
+
+```text
+We are in the geometry_dash_ai repo. Run the optional imitation support
+follow-up from plan.md only if it helps bootstrap or diagnose the RL practice
+agent.
+
+Current state:
+- Phases 1 through 6 are implemented.
+- Phase 7 dataset prep is implemented.
+- The first tiny PyTorch imitation baseline exists.
+- Event decoding and predicted macro export are implemented.
+- scripts/predict_imitation_macro.py decodes predictions.jsonl or runs a saved
+  checkpoint over a prepared dataset.
+- pytest currently passes: 107 passed.
+- artifacts/ is ignored and must remain local-only.
+
+Existing real smoke artifact:
+- artifacts/phase7_single_jump_capture
+- artifacts/phase7_single_jump_dataset
+- artifacts/imitation_baseline_smoke
+- macro: examples/macros/single_jump.json
+- dataset: 120 samples, press label tick 20, release label tick 30
+- image loader smoke: 4 x 12 x 16 frame stacks, positive ticks [20, 30]
+- decoded predicted macro:
+  artifacts/imitation_baseline_smoke/predicted_macro/predicted_macro.json
+- decoded events: press tick 20, release tick 30
+
+Optional task:
+Replay the predicted macro through the queued Geode replay checker and compare
+progress against the source demonstration.
 
 Constraints:
-- Use local/offline levels only.
-- Do not use online leaderboard submission.
-- Do not commit generated images, traces, model checkpoints, or artifacts.
-- Do not implement practice memory yet.
+- Do not treat imitation as the main project direction.
 - Do not require zero-shot generalization yet.
+- Do not use online levels or leaderboard submission.
+- Do not commit artifacts, generated frames, traces, checkpoints, or model files.
+- Prefer using the existing gd_imitation image dataset loader.
+- If adding PyTorch or another ML dependency is needed, first check whether it
+  is already installed locally. If it is not installed, either ask before adding
+  the dependency or implement a dependency-free smoke baseline first.
+```
+
+---
+
+## 14. Current RL Practice Handoff
+
+Current main direction:
+
+```text
+Build a level-specific practicing RL agent that always acts through the
+stochastic human mock model.
+```
+
+Use the existing imitation pieces only as optional support tools. Do not make
+macro prediction, zero-shot generalization, online levels, or perfect bot
+behavior the main objective.
+
+Immediate next task:
+
+```text
+Implement the Phase 7 practice environment and reward loop.
+```
+
+Near-term infrastructure:
+
+- Repeated-attempt runner for one small local/offline level.
+- Observation and trace capture aligned to each attempt.
+- Intended action/event log from the policy.
+- Humanized executed input log after perception delay, motor delay, timing
+  variance, miss/drop probability, and input constraints.
+- Reward computation from progress, death, section survival, and clears.
+- Practice summary with best progress, average progress, death histogram,
+  reward curve, and per-attempt metadata.
+
+First implementation target:
+
+```text
+scripted or random policy
+-> intended events
+-> human mock model
+-> queued Geode replay or live bridge
+-> trace/death/progress
+-> reward summary
+-> repeated attempt loop
+```
+
+Success criterion:
+
+```text
+The repo can run many local/offline attempts on the same level through the
+human wrapper, persist intended vs executed event logs, compute rewards, and
+show whether progress improves or degrades across attempts.
+```
+
+Prompt for next Codex chat:
+
+```text
+We are in the geometry_dash_ai repo. Continue from plan.md and
+agent_plan.md.
+
+Main objective:
+Build the Phase 7 practice environment and reward loop for a level-specific
+RL practice agent under a stochastic human mock model.
+
+Current state:
+- Phases 1 through 6 are implemented.
+- Replay, trace capture, screenshot capture, humanized macro execution, and
+  optional imitation dataset/baseline tools exist.
+- pytest previously passed at 107 tests.
+- artifacts/ is ignored and must remain local-only.
+
+Task:
+Add the near-term RL infrastructure:
+- repeated-attempt runner
+- intended action/event logging
+- executed humanized input logging
+- reward computation from trace/death/progress/clear data
+- practice summary for one small local/offline level
+
+Constraints:
+- The RL policy outputs intended actions/events only.
+- All intended outputs must pass through the human mock model before reaching
+  Geometry Dash.
+- Imitation components are optional bootstrap or diagnostics only.
+- Do not focus on zero-shot generalization, online levels, leaderboard use, or
+  perfect bot behavior.
+- Prioritize a small local/offline level that can be attempted repeatedly.
 ```
