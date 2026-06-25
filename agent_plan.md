@@ -1254,6 +1254,101 @@ Next recommended implementation step:
   untrained no_op/press/release sampler produces dense contradictory intents.
 ```
 
+Desired button-state adapter implementation update:
+
+```text
+Implemented:
+  gd_rl/live_learner.py
+    - TinyLivePolicyNetwork now outputs desired button states:
+        up, down
+      instead of directly sampling no_op/press/release events.
+    - Added ButtonStateIntentAdapter, which tracks intended button state and
+      converts desired state transitions into edge intents:
+        intended up -> desired down: press
+        intended down -> desired down: no_op
+        intended down -> desired up: release
+        intended up -> desired up: no_op
+    - The adapter is intentionally based on intended state, not executed bridge
+      input state, so human visual/motor delay does not cause repeated press or
+      release intents while a humanized event is pending.
+    - ReinforceAttemptSummary now reports both:
+        action_counts: desired up/down counts
+        intent_counts: emitted no_op/press/release intent counts
+    - Training summary policy metadata now reports desired_button_states and
+      intent_action_kinds separately.
+
+  gd_rl/__init__.py
+    - exported ButtonStateIntentAdapter and DESIRED_BUTTON_STATES.
+
+  tests/test_live_learner.py
+    - added fake/unit coverage proving repeated desired down emits one press
+      then no_op, independent of delayed executed input.
+    - updated the one-step reward learner test to train toward desired down
+      and verify the emitted intent is press.
+
+Verification:
+  python -m pytest -q tests/test_live_learner.py
+  python -m pytest -q tests/test_live_practice_env.py tests/test_live_learner.py tests/test_run_live_rl_practice_geode.py
+  python scripts/run_live_rl_practice_geode.py --help
+  python -m pytest -q
+  python -m pytest --collect-only
+  result: 138 tests collected; full pytest passed
+
+Manual live retry:
+  Attempted a 1-attempt guarded local/offline smoke with the updated adapter:
+    artifacts/live_rl_practice_20260626_014424
+  The bridge timed out before a summary or diagnostics were persisted:
+    error: bridge communication failed: cannot read from timed out object
+  This left only an empty attempt_001 directory under artifacts/. Rerun after
+  confirming the Geode observation stream is active at the fresh level start.
+
+Successful desired-state live smoke:
+  Command:
+    python scripts/run_live_rl_practice_geode.py
+      --level-id manual_live_rl_desired_state_smoke
+      --attempts 1
+      --max-steps 600
+      --profile Advanced
+      --post-terminal-delay-seconds 5
+      --start-guard-reset-retries 3
+      --start-guard-retry-delay-seconds 1
+      --require-start-percent-max 2
+      --require-start-x-max 50
+
+  Artifact:
+    artifacts/live_rl_practice_20260626_014925
+
+  Result:
+    attempts: 1
+    step_count: 206
+    cleared: false
+    death_tick: 206
+    final/best percent: 26.0430
+    row_count: 207
+    total_reward: 32.0423
+    reset_attempts: 1
+    desired action counts: up 111, down 95
+    emitted intent counts: no_op 107, press 50, release 49
+    intended_event_count: 99
+    executed_event_count: 93
+    dropped_event_count: 2
+    pending_not_dispatched_count: 4
+    observed input transition count in trace: 33
+
+  Comparison with previous direct no_op/press/release smoke:
+    intended_event_count improved from 133 to 99.
+    dropped_event_count improved from 61 to 2.
+    observed input transitions stayed similar: 34 -> 33.
+    progress/death outcome stayed the same at this untrained one-attempt
+    smoke, which is expected; the policy is still random, but the intent stream
+    is now much less contradictory.
+
+Next recommended implementation step:
+  Add a small input-rate penalty/cooldown or short hold-duration prior before
+  running multi-attempt live training, because the desired-state adapter removes
+  impossible duplicate edges but still allows rapid random toggling.
+```
+
 ---
 
 ## 11. Prompt For Next Agent Work

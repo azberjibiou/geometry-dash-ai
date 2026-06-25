@@ -5,13 +5,15 @@ from __future__ import annotations
 import random
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Literal, Protocol, Sequence
 
 from gd_rl.actions import ActionKind, IntendedAction
 from gd_rl.live_env import LivePracticeObservation, LiveStepResult
 from gd_rl.results import AttemptResult
 
 ACTION_KINDS: tuple[ActionKind, ...] = ("no_op", "press", "release")
+DesiredButtonState = Literal["up", "down"]
+DESIRED_BUTTON_STATES: tuple[DesiredButtonState, ...] = ("up", "down")
 MODE_ORDER = (
     "cube",
     "ship",
@@ -103,12 +105,54 @@ class ReinforceConfig:
 
 
 @dataclass(slots=True)
+class ButtonStateIntentAdapter:
+    """Map desired button states to intended press/release edges.
+
+    The adapter tracks intended button state instead of live executed input.
+    That keeps visual and motor delay from causing repeated press/release
+    intents while an already-requested humanized event is still pending.
+    """
+
+    intended_input_down: bool = False
+
+    def reset(self, observation: LivePracticeObservation | None = None) -> None:
+        """Start a new attempt from the current fresh-reset input state."""
+
+        self.intended_input_down = (
+            bool(observation.latest.input_down) if observation is not None else False
+        )
+
+    def intent_for_desired_state(
+        self,
+        desired_button_state: DesiredButtonState,
+        *,
+        tick: int,
+    ) -> IntendedAction:
+        """Return the edge needed to reach the desired intended state."""
+
+        if desired_button_state == "down":
+            if self.intended_input_down:
+                return IntendedAction.no_op(tick)
+            self.intended_input_down = True
+            return IntendedAction.press(tick)
+        if desired_button_state == "up":
+            if not self.intended_input_down:
+                return IntendedAction.no_op(tick)
+            self.intended_input_down = False
+            return IntendedAction.release(tick)
+        raise LiveLearnerError(
+            f"unknown desired button state {desired_button_state!r}"
+        )
+
+
+@dataclass(slots=True)
 class NeuralActionDecision:
     """One policy decision plus tensors needed for REINFORCE."""
 
     intent: IntendedAction
     action_index: int
-    action_kind: ActionKind
+    desired_button_state: DesiredButtonState
+    desired_input_down: bool
     probability: float
     logits: list[float]
     features: list[float]
@@ -119,7 +163,8 @@ class NeuralActionDecision:
         return {
             "intent": asdict(self.intent),
             "action_index": self.action_index,
-            "action_kind": self.action_kind,
+            "desired_button_state": self.desired_button_state,
+            "desired_input_down": self.desired_input_down,
             "probability": self.probability,
             "logits": list(self.logits),
             "features": list(self.features),
@@ -137,6 +182,7 @@ class ReinforceAttemptSummary:
     policy_loss: float
     entropy: float
     action_counts: dict[str, int]
+    intent_counts: dict[str, int]
     attempt_result: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
@@ -163,7 +209,7 @@ class ReinforceTrainingSummary:
 
 
 class TinyLivePolicyNetwork:
-    """Small MLP policy that maps compact observations to intent logits."""
+    """Small MLP policy that maps compact observations to desired button state."""
 
     def __init__(
         self,
@@ -175,7 +221,7 @@ class TinyLivePolicyNetwork:
         if input_dim <= 0:
             raise LiveLearnerError("input_dim must be positive")
         self.input_dim = input_dim
-        self.output_dim = len(ACTION_KINDS)
+        self.output_dim = len(DESIRED_BUTTON_STATES)
         self.torch = _import_torch()
         _set_seed(self.torch, self.config.seed)
         self.device = self.torch.device(self.config.device)
@@ -214,6 +260,7 @@ class TinyLivePolicyNetwork:
         self,
         observation: LivePracticeObservation,
         *,
+        intent_adapter: ButtonStateIntentAdapter | None = None,
         deterministic: bool = False,
     ) -> NeuralActionDecision:
         features = encode_live_observation(observation, config=self.config.encoder)
@@ -229,17 +276,20 @@ class TinyLivePolicyNetwork:
         else:
             action_index_tensor = distribution.sample()
         action_index = int(action_index_tensor.detach().cpu().item())
-        action_kind = ACTION_KINDS[action_index]
+        desired_button_state = DESIRED_BUTTON_STATES[action_index]
+        adapter = intent_adapter or _adapter_from_observation(observation)
+        intent = adapter.intent_for_desired_state(
+            desired_button_state,
+            tick=observation.tick,
+        )
         probability = float(
             self.torch.softmax(logits, dim=-1)[action_index].detach().cpu().item()
         )
         return NeuralActionDecision(
-            intent=IntendedAction(
-                tick=observation.tick,
-                kind=action_kind,
-            ),
+            intent=intent,
             action_index=action_index,
-            action_kind=action_kind,
+            desired_button_state=desired_button_state,
+            desired_input_down=desired_button_state == "down",
             probability=probability,
             logits=[float(value) for value in logits.detach().cpu().tolist()],
             features=features,
@@ -303,15 +353,20 @@ def run_reinforce_attempt(
     rewards: list[float] = []
     log_probs: list[Any] = []
     entropies: list[Any] = []
-    action_counts = {kind: 0 for kind in ACTION_KINDS}
+    action_counts = {state: 0 for state in DESIRED_BUTTON_STATES}
+    intent_counts = {kind: 0 for kind in ACTION_KINDS}
+    intent_adapter = ButtonStateIntentAdapter()
+    intent_adapter.reset(observation)
     last_step: LiveStepResult | None = None
 
     while True:
         decision = policy.act(
             observation,
+            intent_adapter=intent_adapter,
             deterministic=effective_config.deterministic_actions,
         )
-        action_counts[decision.action_kind] += 1
+        action_counts[decision.desired_button_state] += 1
+        intent_counts[decision.intent.kind] += 1
         last_step = env.step(decision.intent)
         rewards.append(float(last_step.reward))
         log_probs.append(decision.log_probability_tensor)
@@ -360,6 +415,7 @@ def run_reinforce_attempt(
         policy_loss=float(policy_loss_tensor.detach().cpu().item()),
         entropy=float(entropy_tensor_sum.detach().cpu().item()),
         action_counts={kind: int(count) for kind, count in action_counts.items()},
+        intent_counts={kind: int(count) for kind, count in intent_counts.items()},
         attempt_result=attempt_result,
     )
 
@@ -394,7 +450,8 @@ def run_reinforce_training(
             "policy": {
                 "input_dim": policy.input_dim,
                 "output_dim": policy.output_dim,
-                "action_kinds": list(ACTION_KINDS),
+                "desired_button_states": list(DESIRED_BUTTON_STATES),
+                "intent_action_kinds": list(ACTION_KINDS),
                 "hidden_size": policy.config.hidden_size,
                 "device": policy.config.device,
                 "encoder": asdict(policy.config.encoder),
@@ -446,6 +503,14 @@ def _set_seed(torch: Any, seed: int) -> None:
         torch.use_deterministic_algorithms(True)
     except Exception:
         pass
+
+
+def _adapter_from_observation(
+    observation: LivePracticeObservation,
+) -> ButtonStateIntentAdapter:
+    adapter = ButtonStateIntentAdapter()
+    adapter.reset(observation)
+    return adapter
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:

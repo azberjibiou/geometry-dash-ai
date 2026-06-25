@@ -11,6 +11,8 @@ from gd_rl.live_env import (
 )
 from gd_rl.live_learner import (
     ACTION_KINDS,
+    DESIRED_BUTTON_STATES,
+    ButtonStateIntentAdapter,
     LiveLearnerError,
     LiveObservationEncoderConfig,
     NeuralActionDecision,
@@ -57,7 +59,9 @@ __all__ = [
     "ActionKind",
     "ACTION_KINDS",
     "AttemptResult",
+    "ButtonStateIntentAdapter",
     "CandidateEvaluation",
+    "DESIRED_BUTTON_STATES",
     "GeodeExecutorConfig",
     "GeodePracticeExecutor",
     "GenerationResult",

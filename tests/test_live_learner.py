@@ -6,6 +6,8 @@ import pytest
 from gd_env import BridgeDiagnostic, BridgeObservation
 from gd_human_model import Event, HumanProfile
 from gd_rl import (
+    ButtonStateIntentAdapter,
+    IntendedAction,
     LiveObservationEncoderConfig,
     LivePracticeEnv,
     LivePracticeEnvConfig,
@@ -46,7 +48,26 @@ def test_live_observation_encoder_masks_missing_policy_observation() -> None:
     assert features == [0.0] * live_observation_feature_dim()
 
 
-def test_reinforce_training_updates_press_probability_and_writes_summary(
+def test_button_state_adapter_uses_intended_state_not_executed_state() -> None:
+    adapter = ButtonStateIntentAdapter()
+    adapter.reset(
+        LivePracticeObservation(
+            latest=_observation(0, percent=0.0, input_down=False),
+            policy_observation=_observation(0, percent=0.0, input_down=False),
+        )
+    )
+
+    assert adapter.intent_for_desired_state("down", tick=100) == IntendedAction.press(
+        100
+    )
+    assert adapter.intent_for_desired_state("down", tick=101).kind == "no_op"
+    assert adapter.intent_for_desired_state("up", tick=102) == IntendedAction.release(
+        102
+    )
+    assert adapter.intent_for_desired_state("up", tick=103).kind == "no_op"
+
+
+def test_reinforce_training_updates_down_probability_and_writes_summary(
     tmp_path: Path,
 ) -> None:
     torch = pytest.importorskip("torch")
@@ -65,12 +86,12 @@ def test_reinforce_training_updates_press_probability_and_writes_summary(
     policy = TinyLivePolicyNetwork.from_encoder_config(
         NeuralPolicyConfig(hidden_size=4, seed=7)
     )
-    _bias_policy_toward_press(torch, policy)
+    _bias_policy_toward_down(torch, policy)
     observation = LivePracticeObservation(
         latest=_observation(0, percent=0.0),
         policy_observation=_observation(0, percent=0.0),
     )
-    before_press_probability = policy.action_probabilities(observation)[1]
+    before_down_probability = policy.action_probabilities(observation)[1]
 
     with env:
         summary = run_reinforce_training(
@@ -85,15 +106,16 @@ def test_reinforce_training_updates_press_probability_and_writes_summary(
             summary_path=tmp_path / "learner_summary.json",
         )
 
-    after_press_probability = policy.action_probabilities(observation)[1]
+    after_down_probability = policy.action_probabilities(observation)[1]
     written_summary = json.loads(
         (tmp_path / "learner_summary.json").read_text(encoding="utf-8")
     )
 
     assert fake_client.sent_events == [Event(0, "press")]
-    assert after_press_probability > before_press_probability
+    assert after_down_probability > before_down_probability
     assert summary.attempt_count == 1
-    assert summary.attempts[0].action_counts["press"] == 1
+    assert summary.attempts[0].action_counts["down"] == 1
+    assert summary.attempts[0].intent_counts["press"] == 1
     assert summary.attempts[0].attempt_result["cleared"] is True
     assert written_summary["attempt_count"] == 1
 
@@ -143,12 +165,12 @@ class OneStepPressRewardClient:
         self.sent_events.append(event)
 
 
-def _bias_policy_toward_press(torch, policy: TinyLivePolicyNetwork) -> None:  # type: ignore[no-untyped-def]
+def _bias_policy_toward_down(torch, policy: TinyLivePolicyNetwork) -> None:  # type: ignore[no-untyped-def]
     with torch.no_grad():
         for parameter in policy.model.parameters():
             parameter.zero_()
         policy.model[2].bias.copy_(
-            torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
+            torch.tensor([0.0, 1.0], dtype=torch.float32)
         )
 
 
