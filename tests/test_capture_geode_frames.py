@@ -2,6 +2,7 @@ import pytest
 
 from gd_env import BridgeObservation
 from scripts.capture_geode_frames import (
+    _observations_to_trace_rows,
     _pre_capture_terminal_reason,
     _summarize_observations,
     _terminal_reason,
@@ -129,6 +130,23 @@ def test_observation_summary_reports_terminal_state() -> None:
         "dead": False,
         "completed": True,
     }
+
+
+def test_observations_to_trace_rows_preserves_capture_metadata() -> None:
+    rows = _observations_to_trace_rows(
+        [_observation(tick=7, percent=12.5)],
+        fps=240,
+        cbf=False,
+        physics_bypass=True,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].tick == 7
+    assert rows[0].time_ms == 7 * 1000 / 240
+    assert rows[0].percent == 12.5
+    assert rows[0].fps == 240
+    assert rows[0].cbf is False
+    assert rows[0].physics_bypass is True
 
 
 def _observation(

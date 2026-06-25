@@ -28,7 +28,7 @@ from gd_capture import (
     write_bmp,
 )
 from gd_env import BridgeObservation, GeometryDashClient
-from gd_trace import load_macro_json
+from gd_trace import TraceRow, load_macro_json, save_trace_jsonl
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -42,6 +42,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=29430)
     parser.add_argument("--timeout-seconds", type=float, default=5.0)
     parser.add_argument("--fps", type=int, default=240)
+    parser.add_argument("--cbf", action="store_true")
+    parser.add_argument("--physics-bypass", action="store_true")
     parser.add_argument("--max-frames", type=int, default=120)
     parser.add_argument(
         "--start-capture-tick",
@@ -224,6 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_dir = args.output_dir or Path("artifacts") / f"frame_capture_{run_id}"
     frames_dir = output_dir / "frames"
     manifest_path = output_dir / "manifest.jsonl"
+    trace_path = output_dir / "trace.jsonl"
     summary_path = output_dir / "summary.json"
     output_dir.mkdir(parents=True, exist_ok=True)
     frames_dir.mkdir(parents=True, exist_ok=True)
@@ -337,6 +340,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     save_manifest_jsonl(records, manifest_path)
+    trace_rows = _observations_to_trace_rows(
+        observations,
+        fps=args.fps,
+        cbf=args.cbf,
+        physics_bypass=args.physics_bypass,
+    )
+    save_trace_jsonl(trace_rows, trace_path)
 
     validation_document = None
     validation_ok = True
@@ -349,8 +359,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "run_id": run_id,
         "output_dir": str(output_dir),
         "manifest_path": str(manifest_path),
+        "trace_path": str(trace_path),
         "frame_count": len(records),
         "observation_count": len(observations),
+        "trace_row_count": len(trace_rows),
         "macro": (
             {
                 "path": str(args.macro_json),
@@ -365,6 +377,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "host": args.host,
             "port": args.port,
             "fps": args.fps,
+            "cbf": args.cbf,
+            "physics_bypass": args.physics_bypass,
             "max_frames": args.max_frames,
             "start_capture_tick": args.start_capture_tick,
             "stride": args.stride,
@@ -396,8 +410,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "output_dir": str(output_dir),
                 "manifest_jsonl": str(manifest_path),
+                "trace_jsonl": str(trace_path),
                 "summary_json": str(summary_path),
                 "frame_count": len(records),
+                "trace_row_count": len(trace_rows),
                 "validation_ok": validation_ok,
             },
             indent=2,
@@ -473,6 +489,23 @@ def _capture_record(
         fps=fps,
         window_title=window_title,
     )
+
+
+def _observations_to_trace_rows(
+    observations: list[BridgeObservation],
+    *,
+    fps: int,
+    cbf: bool,
+    physics_bypass: bool,
+) -> list[TraceRow]:
+    return [
+        observation.to_trace_row(
+            fps=fps,
+            cbf=cbf,
+            physics_bypass=physics_bypass,
+        )
+        for observation in observations
+    ]
 
 
 def _validate_start_observation(
