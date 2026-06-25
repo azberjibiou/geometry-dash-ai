@@ -1169,6 +1169,91 @@ Next recommended implementation step:
   guards and no checkpoint/artifact commits.
 ```
 
+Guarded live neural smoke driver implementation update:
+
+```text
+Implemented:
+  scripts/run_live_rl_practice_geode.py
+    - tiny live Geode REINFORCE smoke CLI
+    - wires GeometryDashClient -> LivePracticeEnv -> TinyLivePolicyNetwork
+      -> run_reinforce_training(...)
+    - uses policy intent only; LivePracticeEnv still routes all press/release
+      intent through the online HumanizedAgent before sending bridge actions
+    - writes run output under artifacts/live_rl_practice_<timestamp> by default
+      with training_summary.json plus per-attempt live env artifacts
+    - defaults are intentionally small:
+        attempts: 1
+        max_steps: 600
+        device: cpu
+        no checkpoint writing
+    - conservative live guard defaults:
+        --post-terminal-delay-seconds 5
+        --start-guard-reset-retries 3
+        --start-guard-retry-delay-seconds 1
+        --require-start-percent-max 2
+        --require-start-x-max 50
+
+  tests/test_run_live_rl_practice_geode.py
+    - verifies smoke defaults and config wiring
+    - runs the CLI main path with a fake one-step terminal bridge client, so
+      Geometry Dash is not required
+    - verifies training_summary.json and per-attempt summary persistence
+
+Verification:
+  python scripts/run_live_rl_practice_geode.py --help
+  python -m pytest -q tests/test_live_practice_env.py tests/test_live_learner.py tests/test_run_live_rl_practice_geode.py
+  python -m pytest -q
+  result: 137 passed
+
+Manual live smoke update:
+  Date:
+    2026-06-26
+
+  Command:
+    python scripts/run_live_rl_practice_geode.py
+      --level-id manual_live_rl_smoke
+      --attempts 1
+      --max-steps 600
+      --profile Advanced
+      --post-terminal-delay-seconds 5
+      --start-guard-reset-retries 3
+      --start-guard-retry-delay-seconds 1
+      --require-start-percent-max 2
+      --require-start-x-max 50
+
+  Artifact:
+    artifacts/live_rl_practice_20260626_013351
+
+  Result:
+    attempts: 1
+    step_count: 206
+    cleared: false
+    death_tick: 206
+    final/best percent: 26.0430
+    row_count: 207
+    total_reward: 32.0423
+    reset_attempts: 1
+    policy action counts: no_op 73, press 48, release 85
+    intended_event_count: 133
+    executed_event_count: 70
+    dropped_event_count: 61
+    pending_not_dispatched_count: 2
+    observed input transition count in trace: 34
+
+  Interpretation:
+    The first guarded neural live smoke successfully ran the tiny
+    observation-conditioned REINFORCE loop through the real local/offline Geode
+    bridge. The untrained policy was noisy and died early, which is expected
+    for this smoke; the important validation is that neural intent, online
+    humanization, executed bridge input, trace capture, reward, and summaries
+    all completed end to end.
+
+Next recommended implementation step:
+  Add a small action regularization or stateful button-head constraint for the
+  live neural policy before running multi-attempt training, because the
+  untrained no_op/press/release sampler produces dense contradictory intents.
+```
+
 ---
 
 ## 11. Prompt For Next Agent Work
