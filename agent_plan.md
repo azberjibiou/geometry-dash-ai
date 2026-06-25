@@ -1134,6 +1134,41 @@ Next recommended implementation step:
   run yet.
 ```
 
+Tiny live neural learner implementation update:
+
+```text
+Implemented:
+  gd_rl/live_learner.py
+    - compact observation encoder for LivePracticeObservation
+      using the delayed policy-visible bridge observation
+    - TinyLivePolicyNetwork, a small PyTorch MLP with action logits for:
+        no_op, press, release
+    - NeuralActionDecision for logging policy probabilities and intended
+      actions
+    - REINFORCE-style one-episode update:
+        observation -> neural policy -> intended action
+        -> LivePracticeEnv -> human model -> executed input
+        -> reward/done -> discounted returns -> policy update
+    - short-run training summary persistence via run_reinforce_training(...)
+
+  tests/test_live_learner.py
+    - encoder tests that do not require Geometry Dash
+    - fake one-step live client where a press clears the synthetic attempt
+    - verifies the neural policy update increases press probability after a
+      rewarded press action
+
+Notes:
+  This is the first neural model in the live RL path. It is intentionally small
+  and diagnostic: it proves the live step environment can feed a neural policy
+  and receive a policy-gradient update without running a large training job.
+  PyTorch remains loaded only when the live learner is constructed.
+
+Next recommended implementation step:
+  Add a guarded live CLI/smoke driver that can run a very small number of
+  local/offline REINFORCE attempts through Geode, with conservative reset
+  guards and no checkpoint/artifact commits.
+```
+
 ---
 
 ## 11. Prompt For Next Agent Work
