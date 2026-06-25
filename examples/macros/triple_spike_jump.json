@@ -1,0 +1,18 @@
+{
+  "events": [
+    {
+      "kind": "press",
+      "player": "p1",
+      "tick": 192
+    },
+    {
+      "kind": "release",
+      "player": "p1",
+      "tick": 212
+    }
+  ],
+  "metadata": {
+    "description": "Centered jump timing for the local/offline triple-spike fixture.",
+    "level_name": "triple_spike_test"
+  }
+}

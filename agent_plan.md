@@ -163,6 +163,224 @@ Current limitation:
   local/offline level runs.
 ```
 
+Latest live Geode wiring status:
+
+```text
+Implemented:
+  gd_rl/geode_executor.py
+    - GeodeExecutorConfig
+    - GeodePracticeExecutor implementing the PracticeAttemptExecutor protocol
+    - live queued macro execution:
+      human_executed_events.json
+      -> client.load_macro(...)
+      -> reset_attempt(...)
+      -> run_loaded_macro(...)
+      -> trace rows returned to PracticeRunner
+    - start/progress guards for wrong-level or stale-attempt protection
+    - geode_diagnostics.json per attempt
+
+  scripts/run_rl_practice_geode.py
+    - live Phase A CLI wiring
+    - policies:
+      no-input
+      scripted macro
+      random event schedule
+    - HumanProfile selection from built-ins or profile JSON
+    - reward weight options
+    - Geode bridge settings and local/offline guard options
+
+Verification:
+  python scripts/run_rl_practice_geode.py --help
+  pytest: 121 passed
+
+Usage sketch:
+  python scripts/run_rl_practice_geode.py \
+    --level-id tiny_local_fixture \
+    --policy scripted \
+    --macro-json examples/macros/single_jump.json \
+    --attempts 5 \
+    --profile Advanced \
+    --stop-on-success \
+    --require-start-percent-max 2 \
+    --require-start-x-max 50
+
+Current limitation:
+  The wiring is unit-tested with a fake Geode client, but the live script still
+  needs a manual local/offline Geometry Dash smoke run with the Geode bridge
+  active.
+```
+
+Live smoke update:
+
+```text
+Manual local/offline Geode bridge run succeeded.
+
+Scripted single-jump smoke:
+  command:
+    python scripts/run_rl_practice_geode.py
+      --level-id manual_live_smoke
+      --policy scripted
+      --macro-json examples/macros/single_jump.json
+      --attempts 3
+      --profile Advanced
+      --max-observations 400
+      --require-start-percent-max 2
+      --require-start-x-max 50
+
+  artifact:
+    artifacts/rl_practice_geode_20260626_002734
+
+  result:
+    attempts: 3
+    clears: 0
+    deaths: 3
+    death_tick: 206 in all attempts
+    final/best percent: about 21.616 in all attempts
+    intended_event_count: 2
+    executed_event_count: 2
+    dropped_event_count: 0
+    attempt 1 executed macro events: press 20, release 28
+    attempt 1 observed input transitions: press 20, release 28
+
+No-input baseline smoke:
+  artifact:
+    artifacts/rl_practice_geode_20260626_002746
+
+  result:
+    attempts: 3
+    clears: 0
+    deaths: 3
+    death_tick: 206 in all attempts
+    final/best percent: about 21.616 in all attempts
+    intended_event_count: 0
+    executed_event_count: 0
+    observed input transitions: none
+
+Interpretation:
+  Live bridge wiring is working. Policy-intended events, humanized executed
+  events, Geode input transitions, traces, rewards, and summaries are all being
+  persisted through the Phase A runner.
+
+  The current manual level appears not to benefit from the single_jump fixture,
+  or the click is irrelevant/too early for that level. The next validation
+  should use a known tiny local fixture where no-input and scripted macros
+  produce different progress or clear outcomes.
+```
+
+Live reset-after-clear bug note:
+
+```text
+Observed issue:
+  Restarting immediately after a clear can make the Geometry Dash progress bar
+  stop updating correctly.
+
+Mitigation implemented:
+  PracticeRunConfig.stop_after_first_clear
+  scripts/run_rl_practice_geode.py --stop-after-first-clear
+
+Related hardening:
+  GeodeExecutorConfig.start_guard_reset_retries
+  GeodeExecutorConfig.start_guard_retry_delay_seconds
+
+Verification:
+  pytest: 122 passed
+
+Current recommendation:
+  For live local/offline smoke tests that may clear the level, run with:
+    --stop-on-success
+    --stop-after-first-clear
+
+  Do not run repeated post-clear attempts automatically until the Geode/GD
+  reset-after-clear progress bar bug is fixed or fully understood.
+```
+
+Successful triple-spike live smoke:
+
+```text
+Command:
+  python scripts/run_rl_practice_geode.py
+    --level-id manual_triple_spike_smoke
+    --policy scripted
+    --macro-json examples/macros/triple_spike_jump.json
+    --attempts 5
+    --profile Advanced
+    --max-observations 1400
+    --stop-on-success
+    --stop-after-first-clear
+    --post-terminal-delay-seconds 0.5
+    --require-start-percent-max 2
+    --require-start-x-max 50
+
+Artifact:
+  artifacts/rl_practice_geode_20260626_003101
+
+Result:
+  attempts configured: 5
+  attempts run: 1
+  stopped after first clear: yes
+  clear: true
+  final_percent: 100.0
+  death_tick: none
+  row_count: 625
+  last_tick: 624
+  playtime: 2.6 seconds
+  total_reward: 252.5
+  intended_event_count: 2
+  executed_event_count: 2
+  dropped_event_count: 0
+  executed macro events: press 192, release 210
+  observed input transitions: press 192, release 210
+
+Interpretation:
+  The live Phase A practice runner can now execute a scripted policy through
+  the human model into Geode queued replay, clear the local/offline triple-spike
+  fixture, persist trace/reward/artifacts, and avoid the known post-clear
+  progress-bar reset bug by stopping after the first clear.
+```
+
+Post-clear delayed restart smoke:
+
+```text
+Command:
+  python scripts/run_rl_practice_geode.py
+    --level-id manual_triple_spike_restart_delay_5s
+    --policy scripted
+    --macro-json examples/macros/triple_spike_jump.json
+    --attempts 3
+    --profile Advanced
+    --max-observations 1400
+    --stop-on-success
+    --post-terminal-delay-seconds 5
+    --start-guard-reset-retries 3
+    --start-guard-retry-delay-seconds 1
+    --require-start-percent-max 2
+    --require-start-x-max 50
+
+Artifact:
+  artifacts/rl_practice_geode_20260626_003156
+
+Result:
+  attempts run: 3
+  clears: 3
+  deaths: 0
+  clear_rate: 1.0
+  final_percent_by_attempt: [100.0, 100.0, 100.0]
+  reset_attempts: 1 for every attempt
+  start_percent: about 0.157 for every attempt
+  last_tick: 634 for every attempt
+
+Observed input transitions:
+  attempt 1: press 192, release 210
+  attempt 2: press 194, release 210
+  attempt 3: press 193, release 212
+
+Interpretation:
+  A 5 second post-terminal delay allows the live loop to continue across clears
+  without triggering the observed progress-bar/reset issue in this smoke run.
+  Keep this delay for repeated live clear loops until the underlying Geode/GD
+  reset-after-clear behavior is fixed or better characterized.
+```
+
 The imitation smoke artifact remains useful as a diagnostic fixture, but the
 next main task is not to improve imitation. The next main task is the RL
 practice environment and reward loop.

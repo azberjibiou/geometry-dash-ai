@@ -1,6 +1,7 @@
 """RL-practice scaffolding for level-specific Geometry Dash agents."""
 
 from gd_rl.actions import ActionKind, IntendedAction, actions_to_events
+from gd_rl.geode_executor import GeodeExecutorConfig, GeodePracticeExecutor
 from gd_rl.policy import (
     NoInputPolicy,
     PracticeContext,
@@ -21,6 +22,8 @@ from gd_rl.runner import PracticeAttemptExecutor, PracticeRunConfig, PracticeRun
 __all__ = [
     "ActionKind",
     "AttemptResult",
+    "GeodeExecutorConfig",
+    "GeodePracticeExecutor",
     "IntendedAction",
     "NoInputPolicy",
     "PracticeAttemptExecutor",

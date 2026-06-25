@@ -38,6 +38,7 @@ class PracticeRunConfig:
     output_dir: Path
     max_tick: int | None = None
     success_percent: float = 100.0
+    stop_after_first_clear: bool = False
     base_seed: int | None = None
     timing_reference: str = "target"
     reward_config: RewardConfig = field(default_factory=RewardConfig)
@@ -183,6 +184,8 @@ class PracticeRunner:
             attempt_results.append(result)
             _write_json(result.to_dict(), attempt_dir / "summary.json")
             self.policy.update(result)
+            if self.config.stop_after_first_clear and result.cleared:
+                break
 
         summary = PracticeRunSummary.from_attempts(
             level_id=self.config.level_id,
@@ -194,6 +197,7 @@ class PracticeRunner:
                     "attempts": self.config.attempts,
                     "max_tick": self.config.max_tick,
                     "success_percent": self.config.success_percent,
+                    "stop_after_first_clear": self.config.stop_after_first_clear,
                     "base_seed": base_seed,
                     "timing_reference": self.config.timing_reference,
                     "reward_config": self.config.reward_config.to_dict(),
