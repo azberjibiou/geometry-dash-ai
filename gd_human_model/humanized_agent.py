@@ -6,7 +6,7 @@ import heapq
 from typing import Generic, Iterable, TypeVar
 
 from gd_human_model.events import Event, event_sort_key
-from gd_human_model.motor_noise import MotorNoiseModel
+from gd_human_model.motor_noise import HumanizedEventResult, MotorNoiseModel
 from gd_human_model.observation_buffer import ObservationBuffer
 from gd_human_model.profile import HumanProfile
 
@@ -53,10 +53,17 @@ class HumanizedAgent(Generic[ObservationT]):
     def submit_intended_event(self, event: Event) -> Event | None:
         """Humanize and queue a single intended event."""
 
-        actual_event = self.motor_noise.humanize_event(event)
+        result = self.submit_intended_event_result(event)
+        return result.actual_event
+
+    def submit_intended_event_result(self, event: Event) -> HumanizedEventResult:
+        """Humanize and queue one event, returning detailed provenance."""
+
+        result = self.motor_noise.humanize_event_result(event)
+        actual_event = result.actual_event
         if actual_event is not None:
             self._queue(actual_event)
-        return actual_event
+        return result
 
     def submit_intended_events(self, events: Iterable[Event]) -> list[Event]:
         """Humanize and queue intended events."""

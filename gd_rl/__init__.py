@@ -2,6 +2,13 @@
 
 from gd_rl.actions import ActionKind, IntendedAction, actions_to_events
 from gd_rl.geode_executor import GeodeExecutorConfig, GeodePracticeExecutor
+from gd_rl.live_env import (
+    LiveGeodeClientLike,
+    LivePracticeEnv,
+    LivePracticeEnvConfig,
+    LivePracticeObservation,
+    LiveStepResult,
+)
 from gd_rl.policy import (
     NoInputPolicy,
     PracticeContext,
@@ -39,6 +46,11 @@ __all__ = [
     "GeodePracticeExecutor",
     "GenerationResult",
     "IntendedAction",
+    "LiveGeodeClientLike",
+    "LivePracticeEnv",
+    "LivePracticeEnvConfig",
+    "LivePracticeObservation",
+    "LiveStepResult",
     "NoInputPolicy",
     "PracticeAttemptExecutor",
     "PracticeContext",

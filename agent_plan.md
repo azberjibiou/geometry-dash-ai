@@ -1081,6 +1081,59 @@ Recommended order:
 8. Only after the step environment is reliable, add a minimal neural learner
    such as REINFORCE/A2C/PPO on the local/offline fixture.
 
+Live step environment implementation update:
+
+```text
+Implemented:
+  gd_human_model/humanized_agent.py
+    - added submit_intended_event_result(...) so online execution can log
+      per-intent motor delay, jitter, miss/drop, and actual-event provenance.
+
+  gd_rl/live_env.py
+    - LivePracticeEnvConfig
+    - LivePracticeObservation
+    - LiveStepResult
+    - LivePracticeEnv reset/step/save_attempt abstraction
+    - per-step policy intent is stamped at the current live tick, passed
+      through HumanizedAgent, and only due human-executed events are dispatched
+      to the bridge with send_event(...)
+    - compact bridge observations are used first: tick, percent, x/y,
+      velocities, mode, gravity, input state, dead/completed flags
+    - delayed policy observations are exposed through the human observation
+      buffer while latest observations remain available for logging/alignment
+    - episode artifacts are persisted without requiring a full intended macro
+      up front:
+        policy_intended_events.json
+        human_executed_events.json
+        humanization_details.json
+        trace.jsonl
+        geode_diagnostics.json
+        summary.json
+
+  gd_rl/__init__.py
+    - exported live env types.
+
+  tests/test_live_practice_env.py
+    - fake-client coverage for reset/step, visual delay, motor delay,
+      intent-vs-executed-input separation, terminal persistence, and start
+      guards. Tests do not require Geometry Dash.
+
+Geode bridge capability finding:
+  The existing bridge already accepts live press/release through the protocol
+  "action" message and applies those commands via the Geode mod. No protocol
+  addition was needed for the first live step environment.
+
+Verification:
+  python -m pytest -q
+  result: 132 passed
+
+Next recommended implementation step:
+  Add the smallest learner/driver around LivePracticeEnv, likely a compact
+  observation encoder plus a tiny REINFORCE or A2C loop. Keep the first learner
+  local/offline, short-running, and artifact-only; do not start a large training
+  run yet.
+```
+
 ---
 
 ## 11. Prompt For Next Agent Work
