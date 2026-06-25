@@ -606,6 +606,185 @@ Success criterion:
 Reward ranking matches obvious behavior on small local/offline fixtures.
 ```
 
+Documented live smoke procedure:
+
+Prerequisites:
+
+```text
+Geometry Dash is open on the local/offline triple-spike fixture.
+The Geode bridge is active and listening on 127.0.0.1:29430.
+Do not use online levels or submit leaderboard runs.
+Keep all generated outputs under artifacts/ and do not commit them.
+```
+
+Common live guard flags:
+
+```text
+--post-terminal-delay-seconds 5
+--require-start-percent-max 2
+--require-start-x-max 50
+```
+
+Run the four baseline policies:
+
+```text
+python scripts/run_rl_practice_geode.py \
+  --level-id phase_b_triple_spike_no_input \
+  --policy no-input \
+  --attempts 3 \
+  --profile Advanced \
+  --max-observations 1400 \
+  --stop-on-success \
+  --post-terminal-delay-seconds 5 \
+  --require-start-percent-max 2 \
+  --require-start-x-max 50
+
+python scripts/run_rl_practice_geode.py \
+  --level-id phase_b_triple_spike_early_single_jump \
+  --policy scripted \
+  --macro-json examples/macros/single_jump.json \
+  --attempts 3 \
+  --profile Advanced \
+  --max-observations 1400 \
+  --stop-on-success \
+  --post-terminal-delay-seconds 5 \
+  --require-start-percent-max 2 \
+  --require-start-x-max 50
+
+python scripts/run_rl_practice_geode.py \
+  --level-id phase_b_triple_spike_correct_scripted \
+  --policy scripted \
+  --macro-json examples/macros/triple_spike_jump.json \
+  --attempts 3 \
+  --profile Advanced \
+  --max-observations 1400 \
+  --stop-on-success \
+  --post-terminal-delay-seconds 5 \
+  --require-start-percent-max 2 \
+  --require-start-x-max 50
+
+python scripts/run_rl_practice_geode.py \
+  --level-id phase_b_triple_spike_random \
+  --policy random \
+  --attempts 3 \
+  --profile Advanced \
+  --max-observations 1400 \
+  --stop-on-success \
+  --random-max-events 4 \
+  --random-min-tick 120 \
+  --random-max-tick 260 \
+  --random-min-spacing 8 \
+  --post-terminal-delay-seconds 5 \
+  --require-start-percent-max 2 \
+  --require-start-x-max 50
+```
+
+Compare the generated run summaries:
+
+```text
+python scripts/compare_practice_runs.py \
+  artifacts/<no-input-run>/summary.json \
+  artifacts/<single-jump-run>/summary.json \
+  artifacts/<triple-spike-run>/summary.json \
+  artifacts/<random-run>/summary.json
+```
+
+Optional profile sweep:
+
+```text
+for profile in TopPlayer Advanced Intermediate Beginner; do
+  python scripts/run_rl_practice_geode.py \
+    --level-id phase_b_triple_spike_profile_${profile} \
+    --policy scripted \
+    --macro-json examples/macros/triple_spike_jump.json \
+    --attempts 3 \
+    --profile ${profile} \
+    --max-observations 1400 \
+    --stop-on-success \
+    --post-terminal-delay-seconds 5 \
+    --require-start-percent-max 2 \
+    --require-start-x-max 50
+done
+```
+
+Expected sanity ordering:
+
+```text
+correct triple_spike_jump scripted policy should clear or score best.
+no-input and early single_jump should die near the same early obstacle.
+random should usually be noisy and worse than the correct scripted policy.
+Higher-noise profiles should not outperform lower-noise profiles consistently
+on this timing-sensitive fixture.
+```
+
+Phase B live baseline sweep update:
+
+```text
+Date:
+  2026-06-26
+
+Common flags:
+  --post-terminal-delay-seconds 5
+  --require-start-percent-max 2
+  --require-start-x-max 50
+
+Runs:
+  no-input:
+    artifact: artifacts/phase_b_20260626_003931_no_input
+    attempts: 3
+    clears: 0
+    deaths: 3
+    average_final_percent: 32.4409
+    best_percent: 32.4409
+    death_tick_histogram: {"206": 3}
+    total_reward: 95.0531
+
+  early single_jump:
+    artifact: artifacts/phase_b_20260626_004001_single_jump
+    attempts: 3
+    clears: 0
+    deaths: 3
+    average_final_percent: 32.4409
+    best_percent: 32.4409
+    death_tick_histogram: {"206": 3}
+    total_reward: 95.0531
+
+  correct triple_spike_jump scripted:
+    artifact: artifacts/phase_b_20260626_004024_triple_spike
+    attempts: 3
+    clears: 3
+    deaths: 0
+    clear_rate: 1.0
+    average_final_percent: 100.0
+    best_percent: 100.0
+    total_reward: 657.0276
+
+  random:
+    artifact: artifacts/phase_b_20260626_004129_random_retry
+    attempts: 3
+    clears: 0
+    deaths: 3
+    average_final_percent: 35.9580
+    best_percent: 36.5354
+    death_tick_histogram: {"224": 1, "229": 1, "232": 1}
+    total_reward: 108.7067
+
+Interpretation:
+  Reward ranking matches obvious behavior on the local/offline triple-spike
+  fixture. Correct scripted input clears reliably and scores far above
+  no-input, early single_jump, and random. Random sometimes survives slightly
+  farther than no-input but does not clear.
+
+Live note:
+  The first random run immediately after a repeated-clear scripted run failed
+  before summary persistence because Geode returned a trace with duplicate
+  ticks. Waiting briefly and rerunning random with:
+    --start-guard-reset-retries 3
+    --start-guard-retry-delay-seconds 1
+  succeeded. Keep the 5 second terminal delay and conservative reset retries
+  for live post-clear sweeps.
+```
+
 ### Phase C - Minimal RL Practice Agent
 
 Goal:
@@ -629,6 +808,148 @@ Success criterion:
 ```text
 Repeated attempts improve average progress, best progress, or reward under the
 same HumanProfile compared with the initial policy.
+```
+
+Initial Phase C implementation status:
+
+```text
+Implemented:
+  gd_rl/timing_search.py
+    - TimingEventWindow and TimingSearchConfig
+    - CEM-style candidate sampling and elite window updates
+    - CandidateEvaluation, GenerationResult, and TimingSearchResult
+    - JSON loading for event timing windows
+    - candidate-level error capture for flaky live traces
+
+  scripts/run_rl_timing_search_geode.py
+    - live Geode timing-window search CLI
+    - each sampled candidate is converted to intended Event objects
+    - intended events still pass through PracticeRunner and the human model
+    - candidate artifacts are written under artifacts/<search>/generation_*/candidate_*/
+    - search_summary.json, final_windows.json, and best_intended_macro.json
+      are persisted locally
+
+  examples/timing_windows/
+    - triple_spike_two_orbs_seed.json
+      Broad 6-event search over triple spike plus two orb clicks.
+    - triple_spike_two_orbs_from_memory.json
+      Keeps the known Phase B triple-spike click fixed and searches the two
+      newly added orb clicks.
+
+Verification:
+  pytest: 129 passed
+```
+
+Phase C live smoke on harder local/offline fixture:
+
+```text
+Level change:
+  The local triple-spike fixture was extended with two jump orbs after the
+  triple spike.
+
+Probe:
+  command:
+    python scripts/run_rl_practice_geode.py
+      --level-id phase_c_probe_triple_plus_orbs
+      --policy scripted
+      --macro-json examples/macros/triple_spike_jump.json
+      --attempts 1
+      --profile Advanced
+      --max-observations 1800
+      --stop-on-success
+      --post-terminal-delay-seconds 5
+      --start-guard-reset-retries 3
+      --start-guard-retry-delay-seconds 1
+      --require-start-percent-max 2
+      --require-start-x-max 50
+
+  artifact:
+    artifacts/phase_c_20260626_005454_probe_triple_only
+
+  result:
+    clears: 0
+    death_tick: 345
+    best_percent: 54.3307
+    total_reward: 78.0217
+
+Broad 6-event CEM smoke:
+  artifact:
+    artifacts/phase_c_20260626_005800_timing_search_smoke
+
+  result:
+    generations: 2
+    population_size: 4
+    best_candidate: g000_c003
+    best_percent: 51.515
+    best_score: 73.548
+
+  interpretation:
+    The search machinery worked, but searching the already-solved triple-spike
+    click together with the new orb clicks made the first section unstable.
+
+Memory-seeded CEM smoke:
+  command:
+    python scripts/run_rl_timing_search_geode.py
+      --level-id phase_c_triple_spike_two_orbs_memory_cem_smoke
+      --window-json examples/timing_windows/triple_spike_two_orbs_from_memory.json
+      --generations 2
+      --population-size 6
+      --elite-fraction 0.5
+      --attempts-per-candidate 1
+      --profile Advanced
+      --max-observations 1800
+      --post-terminal-delay-seconds 5
+      --start-guard-reset-retries 3
+      --start-guard-retry-delay-seconds 1
+      --require-start-percent-max 2
+      --require-start-x-max 50
+
+  artifact:
+    artifacts/phase_c_20260626_005925_timing_search_memory_smoke
+
+  best candidate:
+    candidate_id: g001_c005
+    intended events:
+      press 192
+      release 212
+      press 334
+      release 354
+      press 400
+      release 417
+    best_score: 89.9596
+    best_percent in candidate evaluation: 61.6162
+
+Best candidate recheck:
+  artifact:
+    artifacts/phase_c_20260626_010113_best_candidate_recheck
+
+  result:
+    attempts: 3
+    clears: 0
+    average_final_percent: 61.8687
+    best_percent: 62.1212
+    death_tick_histogram: {"488": 1, "490": 1, "492": 1}
+    total_reward: 209.3485
+
+Interpretation:
+  Phase C produced a small but real learning-loop improvement on the harder
+  local/offline fixture. The known triple-spike memory plus CEM over the new
+  orb click windows improved from the triple-only probe at 54.3307% to a
+  rechecked best of 62.1212%. It did not clear yet.
+
+Phase C closure:
+  CEM timing search was useful as a diagnostic only. It confirmed that reward,
+  logging, artifacts, and the human-model boundary can support a learning loop,
+  but it is not the intended long-term agent architecture. Do not continue
+  optimizing this fixture with CEM unless needed for a narrow debugging
+  baseline.
+
+Next direction:
+  Move from queued whole-macro candidates to a live observation-conditioned RL
+  environment. The next agent should make per-step intended decisions from
+  observations, pass those intentions through an online human model, apply the
+  resulting executed inputs to the live local/offline level, and learn from
+  incremental rewards and terminal outcomes.
 ```
 
 ### Phase D - Level Practice Memory
@@ -737,18 +1058,28 @@ logging, or update behavior testable.
 Immediate next task:
 
 ```text
-Implement Phase A: practice environment skeleton and reward computation.
+Start the post-CEM RL pivot: build the first live step-based practice
+environment for observation-conditioned RL.
 ```
 
 Recommended order:
 
-1. Add `gd_rl/` package scaffolding.
-2. Define attempt/result dataclasses.
-3. Implement reward computation from trace rows.
-4. Add a repeated-attempt runner using a scripted or random policy.
-5. Route intended events through `gd_human_model` before replay/application.
-6. Save intended events, executed events, trace paths, rewards, and summaries.
-7. Add focused tests for reward computation and summary aggregation.
+1. Inspect the Geode bridge protocol and determine what live input-control
+   commands already exist or need to be added.
+2. Add a step environment abstraction, such as `LivePracticeEnv`, that exposes
+   reset/step semantics for one local/offline level.
+3. Keep the policy boundary as intent, not direct game input.
+4. Add an online human-action wrapper with delay/noise/drop queues for per-step
+   intended actions.
+5. Start with compact observations from bridge state rather than screenshots:
+   tick, percent, x/y, velocity, input state, dead/clear flags, and recent
+   progress.
+6. Start with a tiny action space: keep/no-op, intend press, intend release,
+   or a short intended tap action.
+7. Add fake-client or synthetic tests so the step loop runs without Geometry
+   Dash.
+8. Only after the step environment is reliable, add a minimal neural learner
+   such as REINFORCE/A2C/PPO on the local/offline fixture.
 
 ---
 
@@ -758,31 +1089,55 @@ Recommended order:
 We are in the geometry_dash_ai repo. Continue from agent_plan.md.
 
 Main objective:
-Implement the Phase A practice environment skeleton for a level-specific RL
-practice agent under a stochastic human mock model.
+Close out Phase C as a diagnostic and start the next phase: build the first
+live observation-conditioned RL practice environment. The goal is to move
+beyond queued whole-macro candidates toward per-step intended actions that are
+filtered through the human mock model before they reach Geometry Dash.
 
 Current state:
-- Phases 1 through 6 are implemented.
-- Humanized macro execution, replay checks, trace capture, and optional
-  imitation support tools exist.
-- pytest previously passed: 107 passed.
+- Phase A RL practice skeleton is implemented and pushed.
+- Live Geode queued replay executor is implemented and pushed.
+- Phase B reward sanity baselines passed on the local/offline triple-spike
+  fixture.
+- Phase C CEM timing search diagnostic is implemented and tested:
+  - `gd_rl/timing_search.py`
+  - `scripts/run_rl_timing_search_geode.py`
+  - timing window examples under `examples/timing_windows/`
+- Phase C live smoke on the harder local/offline fixture
+  (triple spike plus two jump orbs) improved progress from:
+  - triple-only probe best_percent: 54.3307
+  - memory-seeded CEM best recheck: 62.1212
+- CEM is not the final direction and should not be further optimized except as
+  a debugging baseline.
+- pytest previously passed: 129 passed.
 - artifacts/ is ignored and must remain local-only.
 
 Task:
-Add the first RL-practice infrastructure:
-- `gd_rl/` package or equivalent
-- intended action/event representation
-- attempt result and practice summary structures
-- reward computation from trace/death/progress/clear data
-- repeated-attempt runner for a scripted or random policy
-- logging that separates intended policy outputs from executed humanized inputs
+Implement the first live step-based practice environment for real RL:
+- Inspect existing Geode bridge capabilities and identify whether live
+  press/release input commands exist or need to be added.
+- Add a `LivePracticeEnv` or equivalent reset/step abstraction.
+- Each step should consume an observation, accept a policy intent, pass that
+  intent through an online human model, apply only the executed input to the
+  live local/offline level, and return next observation, reward, done, and info.
+- Persist traces and summaries in the same spirit as the queued practice
+  runner, but do not require a full intended macro up front.
+- Add tests with fake clients or synthetic step traces so the environment is
+  testable without Geometry Dash.
+- If bridge support is missing, implement the smallest bridge/protocol addition
+  needed for live local input stepping, with fake-client tests first.
+- Do not start a large training run yet. Once the step environment is reliable,
+  propose the smallest neural RL learner to connect next.
 
 Constraints:
 - RL policy output is intent, not direct game input.
-- All intended outputs must pass through the human mock model before reaching
-  Geometry Dash.
+- All intended outputs must pass through the human mock model.
 - Imitation components are optional support tools only.
-- Use one small local/offline level.
-- Do not focus on zero-shot generalization, online levels, leaderboard use, or
-  perfect bot behavior.
+- Use local/offline levels only.
+- Do not use online levels or leaderboard submission.
+- Do not commit generated artifacts, traces, frames, checkpoints, summaries, or
+  live run outputs.
+- Keep tests runnable without Geometry Dash.
+- Do not keep expanding CEM timing search unless a narrow diagnostic requires
+  it.
 ```

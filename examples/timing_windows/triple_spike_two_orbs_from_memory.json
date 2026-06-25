@@ -1,0 +1,63 @@
+{
+  "events": [
+    {
+      "kind": "press",
+      "max_tick": 192,
+      "mean_tick": 192,
+      "min_tick": 192,
+      "name": "triple_spike_press_memory",
+      "player": "p1",
+      "std_tick": 1
+    },
+    {
+      "kind": "release",
+      "max_tick": 212,
+      "mean_tick": 212,
+      "min_tick": 212,
+      "name": "triple_spike_release_memory",
+      "player": "p1",
+      "std_tick": 1
+    },
+    {
+      "kind": "press",
+      "max_tick": 370,
+      "mean_tick": 345,
+      "min_tick": 315,
+      "name": "orb_1_press",
+      "player": "p1",
+      "std_tick": 16
+    },
+    {
+      "kind": "release",
+      "max_tick": 382,
+      "mean_tick": 352,
+      "min_tick": 322,
+      "name": "orb_1_release",
+      "player": "p1",
+      "std_tick": 12
+    },
+    {
+      "kind": "press",
+      "max_tick": 620,
+      "mean_tick": 470,
+      "min_tick": 370,
+      "name": "orb_2_press",
+      "player": "p1",
+      "std_tick": 70
+    },
+    {
+      "kind": "release",
+      "max_tick": 640,
+      "mean_tick": 478,
+      "min_tick": 378,
+      "name": "orb_2_release",
+      "player": "p1",
+      "std_tick": 70
+    }
+  ],
+  "metadata": {
+    "description": "Phase C windows that preserve the solved triple-spike click from Phase B and search the newly added two-orb section.",
+    "level_name": "triple_spike_plus_two_orbs",
+    "memory": "triple_spike_press/release are fixed to the known clearing timing from examples/macros/triple_spike_jump.json"
+  }
+}

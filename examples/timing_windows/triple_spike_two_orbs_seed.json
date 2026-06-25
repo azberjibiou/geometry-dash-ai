@@ -1,0 +1,63 @@
+{
+  "events": [
+    {
+      "kind": "press",
+      "max_tick": 230,
+      "mean_tick": 192,
+      "min_tick": 155,
+      "name": "triple_spike_press",
+      "player": "p1",
+      "std_tick": 18
+    },
+    {
+      "kind": "release",
+      "max_tick": 245,
+      "mean_tick": 212,
+      "min_tick": 195,
+      "name": "triple_spike_release",
+      "player": "p1",
+      "std_tick": 12
+    },
+    {
+      "kind": "press",
+      "max_tick": 370,
+      "mean_tick": 335,
+      "min_tick": 295,
+      "name": "orb_1_press",
+      "player": "p1",
+      "std_tick": 20
+    },
+    {
+      "kind": "release",
+      "max_tick": 390,
+      "mean_tick": 345,
+      "min_tick": 305,
+      "name": "orb_1_release",
+      "player": "p1",
+      "std_tick": 20
+    },
+    {
+      "kind": "press",
+      "max_tick": 560,
+      "mean_tick": 445,
+      "min_tick": 360,
+      "name": "orb_2_press",
+      "player": "p1",
+      "std_tick": 55
+    },
+    {
+      "kind": "release",
+      "max_tick": 585,
+      "mean_tick": 455,
+      "min_tick": 370,
+      "name": "orb_2_release",
+      "player": "p1",
+      "std_tick": 55
+    }
+  ],
+  "metadata": {
+    "description": "Initial Phase C timing windows for the local/offline triple-spike fixture extended with two jump orbs.",
+    "probe": "Existing triple_spike_jump died at tick 345 and 54.33%, so orb_1 is centered near that failure point.",
+    "level_name": "triple_spike_plus_two_orbs"
+  }
+}

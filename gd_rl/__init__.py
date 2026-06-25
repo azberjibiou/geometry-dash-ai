@@ -18,12 +18,26 @@ from gd_rl.rewards import (
     summarize_trace_outcome,
 )
 from gd_rl.runner import PracticeAttemptExecutor, PracticeRunConfig, PracticeRunner
+from gd_rl.timing_search import (
+    CandidateEvaluation,
+    GenerationResult,
+    TimingCandidate,
+    TimingEventWindow,
+    TimingSearchConfig,
+    TimingSearchResult,
+    load_timing_windows_json,
+    run_timing_search,
+    sample_candidate,
+    update_windows_from_elites,
+)
 
 __all__ = [
     "ActionKind",
     "AttemptResult",
+    "CandidateEvaluation",
     "GeodeExecutorConfig",
     "GeodePracticeExecutor",
+    "GenerationResult",
     "IntendedAction",
     "NoInputPolicy",
     "PracticeAttemptExecutor",
@@ -36,8 +50,16 @@ __all__ = [
     "RewardBreakdown",
     "RewardConfig",
     "ScriptedEventPolicy",
+    "TimingCandidate",
+    "TimingEventWindow",
+    "TimingSearchConfig",
+    "TimingSearchResult",
     "TraceOutcome",
     "actions_to_events",
     "compute_reward",
+    "load_timing_windows_json",
+    "run_timing_search",
+    "sample_candidate",
     "summarize_trace_outcome",
+    "update_windows_from_elites",
 ]
