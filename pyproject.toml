@@ -20,7 +20,7 @@ gd-trace-compare = "gd_trace.cli:trace_compare_main"
 gd-click-window = "gd_trace.cli:click_window_main"
 
 [tool.setuptools.packages.find]
-include = ["gd_capture*", "gd_env*", "gd_human_model*", "gd_imitation*", "gd_trace*"]
+include = ["gd_capture*", "gd_env*", "gd_human_model*", "gd_imitation*", "gd_rl*", "gd_trace*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

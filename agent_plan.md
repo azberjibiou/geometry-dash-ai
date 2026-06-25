@@ -117,6 +117,52 @@ PyTorch: installed with CUDA support
 GPU: NVIDIA GeForce RTX 2060, 6 GB VRAM
 ```
 
+Latest Phase A implementation status:
+
+```text
+Implemented:
+  gd_rl/
+    actions.py
+      - IntendedAction and conversion to canonical Event objects
+
+    policy.py
+      - PracticePolicy base contract
+      - PracticeContext
+      - NoInputPolicy
+      - ScriptedEventPolicy
+      - RandomEventPolicy
+
+    rewards.py
+      - TraceOutcome
+      - RewardConfig
+      - deterministic reward computation from trace rows and event counts
+
+    results.py
+      - AttemptResult
+      - PracticeRunSummary aggregation
+
+    runner.py
+      - PracticeRunner
+      - PracticeAttemptExecutor protocol
+      - per-attempt artifact persistence:
+        policy_intended_events.json
+        human_executed_events.json
+        humanization_details.json
+        trace.jsonl
+        summary.json
+
+    synthetic.py
+      - SyntheticTraceExecutor for non-Geode tests and smoke checks
+
+Verification:
+  pytest: 113 passed
+
+Current limitation:
+  The Phase A runner uses an executor protocol. Synthetic execution is covered
+  by tests; a live Geode executor or script wiring should be added next for
+  local/offline level runs.
+```
+
 The imitation smoke artifact remains useful as a diagnostic fixture, but the
 next main task is not to improve imitation. The next main task is the RL
 practice environment and reward loop.
