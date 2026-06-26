@@ -85,7 +85,12 @@ def main(
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=29430)
     parser.add_argument("--timeout-seconds", type=float, default=5.0)
-    parser.add_argument("--max-steps", type=int, default=600)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=600,
+        help="maximum live env steps per attempt; use 0 to disable truncation",
+    )
     parser.add_argument("--reset-wait-observations", type=int, default=600)
     parser.add_argument("--fps", type=int, default=240)
     parser.add_argument("--cbf", action="store_true")
@@ -93,7 +98,7 @@ def main(
     parser.add_argument("--success-percent", type=float, default=100.0)
     parser.add_argument("--action-horizon-ticks", type=int, default=1)
     parser.add_argument("--observation-buffer-size", type=int)
-    parser.add_argument("--post-terminal-delay-seconds", type=float, default=5.0)
+    parser.add_argument("--post-terminal-delay-seconds", type=float, default=8.0)
     parser.add_argument("--start-guard-reset-retries", type=int, default=3)
     parser.add_argument("--start-guard-retry-delay-seconds", type=float, default=1.0)
     parser.add_argument("--require-start-percent-max", type=float, default=2.0)
@@ -105,7 +110,10 @@ def main(
     parser.add_argument(
         "--encoder-max-tick",
         type=int,
-        help="feature scale for tick; defaults to --max-steps",
+        help=(
+            "feature scale for tick; defaults to positive --max-steps, "
+            "or the encoder default when max steps are disabled"
+        ),
     )
     parser.add_argument("--encoder-x-scale", type=float, default=1000.0)
     parser.add_argument("--encoder-y-scale", type=float, default=500.0)
@@ -161,8 +169,18 @@ def main(
         default=0,
         help="number of repeated desired idle/hold decisions allowed before penalty",
     )
-    parser.add_argument("--epsilon-start", type=float, default=0.20)
-    parser.add_argument("--epsilon-end", type=float, default=0.05)
+    parser.add_argument(
+        "--epsilon-schedule",
+        choices=("linear", "picklegawd"),
+        default="picklegawd",
+        help=(
+            "DQN exploration schedule; picklegawd uses epsilon_start * "
+            "epsilon_decay_rate ** (attempt_index - 1), clipped at epsilon_end"
+        ),
+    )
+    parser.add_argument("--epsilon-start", type=float, default=1.0)
+    parser.add_argument("--epsilon-end", type=float, default=0.01)
+    parser.add_argument("--epsilon-decay-rate", type=float, default=0.995)
     parser.add_argument("--epsilon-decay-steps", type=int, default=1000)
     parser.add_argument(
         "--eval-attempts",
@@ -184,6 +202,24 @@ def main(
     parser.add_argument("--dqn-warmup-steps", type=int, default=32)
     parser.add_argument("--dqn-target-update-interval", type=int, default=100)
     parser.add_argument(
+        "--dqn-success-replay-fraction",
+        type=float,
+        default=0.25,
+        help="fraction of each DQN batch reserved for clear-tail transitions",
+    )
+    parser.add_argument(
+        "--dqn-terminal-replay-fraction",
+        type=float,
+        default=0.25,
+        help="fraction of each DQN batch reserved for terminal transitions",
+    )
+    parser.add_argument(
+        "--dqn-success-reward-threshold",
+        type=float,
+        default=50.0,
+        help="DQN transition reward threshold treated as success replay",
+    )
+    parser.add_argument(
         "--n-step-return",
         type=int,
         default=1,
@@ -204,6 +240,12 @@ def main(
         ),
     )
 
+    parser.add_argument(
+        "--reward-style",
+        choices=("progress", "picklegawd"),
+        default="progress",
+        help="reward formula to use for live-step rewards",
+    )
     parser.add_argument("--progress-scale", type=float, default=1.0)
     parser.add_argument("--best-progress-bonus-scale", type=float, default=0.5)
     parser.add_argument("--section-size-percent", type=float, default=10.0)
@@ -212,6 +254,10 @@ def main(
     parser.add_argument("--death-penalty", type=float, default=10.0)
     parser.add_argument("--excessive-input-free-events", type=int, default=0)
     parser.add_argument("--excessive-input-penalty", type=float, default=0.0)
+    parser.add_argument("--default-reward", type=float, default=0.01)
+    parser.add_argument("--jump-punishment", type=float, default=0.0)
+    parser.add_argument("--checkpoint-reward", type=float, default=0.0)
+    parser.add_argument("--checkpoint-size-percent", type=float, default=3.0)
 
     args = parser.parse_args(argv)
 
@@ -352,8 +398,8 @@ def _validate_args(
         parser.error("--port must be positive")
     if args.timeout_seconds <= 0.0:
         parser.error("--timeout-seconds must be positive")
-    if args.max_steps <= 0:
-        parser.error("--max-steps must be positive")
+    if args.max_steps < 0:
+        parser.error("--max-steps must be non-negative")
     if args.reset_wait_observations <= 0:
         parser.error("--reset-wait-observations must be positive")
     if args.fps <= 0:
@@ -429,8 +475,11 @@ def _build_env_config(
 
 
 def _build_policy_config(args: argparse.Namespace) -> NeuralPolicyConfig:
+    encoder_max_tick = args.encoder_max_tick
+    if encoder_max_tick is None and args.max_steps > 0:
+        encoder_max_tick = args.max_steps
     encoder = LiveObservationEncoderConfig(
-        max_tick=args.encoder_max_tick or args.max_steps,
+        max_tick=encoder_max_tick or LiveObservationEncoderConfig().max_tick,
         x_scale=args.encoder_x_scale,
         y_scale=args.encoder_y_scale,
         velocity_scale=args.encoder_velocity_scale,
@@ -485,13 +534,18 @@ def _build_dqn_config(args: argparse.Namespace) -> DQNConfig:
         attempts=args.attempts,
         gamma=args.gamma,
         learning_rate=args.learning_rate,
+        epsilon_schedule=args.epsilon_schedule,
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
+        epsilon_decay_rate=args.epsilon_decay_rate,
         epsilon_decay_steps=args.epsilon_decay_steps,
         batch_size=args.dqn_batch_size,
         replay_capacity=args.dqn_replay_capacity,
         warmup_steps=args.dqn_warmup_steps,
         target_update_interval=args.dqn_target_update_interval,
+        success_replay_fraction=args.dqn_success_replay_fraction,
+        terminal_replay_fraction=args.dqn_terminal_replay_fraction,
+        success_reward_threshold=args.dqn_success_reward_threshold,
         double_dqn=not args.no_double_dqn,
         n_step_return=args.n_step_return,
         max_grad_norm=None if args.no_grad_clip else args.max_grad_norm,

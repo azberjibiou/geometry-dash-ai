@@ -54,11 +54,13 @@ def test_prepare_imitation_dataset_writes_samples_split_and_summary(tmp_path) ->
     assert [sample["tick"] for sample in samples] == [1, 2, 3, 4]
     assert [sample["tick"] for sample in samples if sample["press_event"]] == [2]
     assert [sample["tick"] for sample in samples if sample["release_event"]] == [3]
+    assert [sample["tick"] for sample in samples if sample["target_input_down"]] == [2]
     assert split["train_count"] == 3
     assert split["validation_count"] == 1
     assert summary["summary"]["sample_count"] == 4
     assert summary["summary"]["press_label_count"] == 1
     assert summary["summary"]["release_label_count"] == 1
+    assert summary["summary"]["target_input_down_count"] == 1
     assert summary["config"]["label_shift_frames"] == 1
 
 

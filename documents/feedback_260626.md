@@ -832,3 +832,156 @@ final greedy policy가 hold로 collapse한 것은
 6. periodic greedy validation checkpoint
 7. Geode lag diagnostics 기반 train/eval timing 검증
 ```
+---
+
+## 12. Live DQN run log - 2026-06-26
+
+Result log only. Do not treat this section as root-cause analysis.
+
+### Code/config facts before the run
+
+- DQN epsilon default was changed to PickleGawd-style schedule:
+  `epsilon = max(0.01, 1.0 * 0.995 ** (attempt_index - 1))`.
+- PickleGawd reward style was available and used for the live runs:
+  default reward `0.01`, jump punishment `-0.2`, death penalty `-10`,
+  clear bonus `100`.
+- Clear delay was set to `8.0` seconds.
+- `--max-steps 0` was added to disable live-env truncation.
+- Related tests passed before the no-cap run:
+  `python -m pytest tests/test_live_practice_env.py::test_live_env_allows_zero_max_steps_to_disable_truncation tests/test_live_practice_env.py::test_live_env_reports_max_steps_as_truncation tests/test_run_live_rl_practice_geode.py::test_build_live_rl_configs_keep_smoke_defaults -q`.
+
+### Artifacts
+
+- 20-attempt smoke:
+  `artifacts/live_dqn_picklegawd_epsilon_smoke_260626`
+  - Used PickleGawd reward + PickleGawd epsilon.
+  - This smoke accidentally used runner defaults for some DQN knobs:
+    `decision_stride=1`, `n_step_return=1`, `gamma=0.99`,
+    `batch_size=32`, `warmup_steps=32`, `replay_capacity=2048`.
+  - No clears.
+  - Training best overall: `41.276039123535156`.
+  - Eval after 20 attempts collapsed to no-input:
+    3/3 eval attempts at `26.82291603088379`, action counts all idle.
+
+- First 300 attempt try:
+  `artifacts/live_dqn_picklegawd_epsilon_300attempt_260626`
+  - Intended 300 attempts, but stopped/exited at saved attempt count `36`.
+  - No clears.
+  - Attempt 34 reached `78.25520324707031%` and was truncated by
+    `max_steps=600`; it was not recorded as clear.
+  - `runner_stderr.log`: `error: bridge communication failed: cannot read from timed out object`.
+
+- Second 300 attempt try:
+  `artifacts/live_dqn_picklegawd_epsilon_300attempt_260626_r2`
+  - Started with `max_steps=1000`.
+  - Stopped immediately after user rejected fixed max-step cap.
+
+- Main no-cap run:
+  `artifacts/live_dqn_picklegawd_epsilon_300attempt_260626_r3`
+  - Command used: PickleGawd reward, PickleGawd epsilon,
+    `decision_stride=4`, `n_step_return=8`, `gamma=0.995`,
+    Double DQN on, `learning_rate=0.0003`, `batch_size=64`,
+    `replay_capacity=10000`, `warmup_steps=256`,
+    `target_update_interval=250`, `eval_attempts=3`,
+    `eval_interval_attempts=50`, `post_terminal_delay_seconds=8`,
+    `timeout_seconds=15`, `max_steps=0`, `fps=144`.
+  - Process was manually stopped after the user said to leave analysis to
+    the next chat.
+  - `training_summary.json` may be partially written because of manual stop.
+    Use per-attempt `summary.json` files for the stable result log.
+  - Saved per-attempt summary dirs counted: `235`.
+  - First saved attempt index: `1`.
+  - Last saved attempt dir index: `312` because eval attempts share the
+    live attempt numbering space.
+
+### Main no-cap run results
+
+- Clear attempt dirs:
+  `49`, `55`, `83`, `96`, `119`, `162`.
+- All six clear attempt diagnostics recorded `live_post_terminal_delay`
+  with `delay_seconds=8.0`.
+- Clear delay ticks:
+  - attempt 49: tick `768`
+  - attempt 55: tick `767`
+  - attempt 83: tick `767`
+  - attempt 96: tick `770`
+  - attempt 119: tick `768`
+  - attempt 162: tick `767`
+
+Window stats from saved per-attempt summaries:
+
+```text
+window 1-50:
+  clears=1
+  best=100.000000
+  mean_best=32.468919
+  mean_reward=-26.020600
+  mean_events=29.180000
+
+window 51-100:
+  clears=3
+  best=100.000000
+  mean_best=35.848326
+  mean_reward=-20.098800
+  mean_events=29.480000
+
+window 101-150:
+  clears=1
+  best=100.000000
+  mean_best=30.433705
+  mean_reward=-17.575400
+  mean_events=20.260000
+
+window 151-200:
+  clears=1
+  best=100.000000
+  mean_best=29.081327
+  mean_reward=-14.831400
+  mean_events=17.080000
+
+window 201-235:
+  clears=0
+  best=35.019455
+  mean_best=27.032169
+  mean_reward=-12.934571
+  mean_events=9.885714
+```
+
+Eval summaries observed before stop:
+
+```text
+after_attempt=50:
+  clear_count=0
+  best_percent_overall=26.82291603088379
+  mean_best_percent=26.82291603088379
+
+after_attempt=100:
+  clear_count=0
+  best_percent_overall=26.753246307373047
+  mean_best_percent=26.753246307373047
+
+after_attempt=150:
+  clear_count=0
+  best_percent_overall=26.82291603088379
+  mean_best_percent=26.82291603088379
+
+after_attempt=200:
+  clear_count=0
+  best_percent_overall=26.718547821044922
+  mean_best_percent=26.718547821044922
+```
+
+Latest 10 saved attempt summaries before stop:
+
+```text
+attempt 303: best=26.82291603088379, executed_events=0, cleared=false
+attempt 304: best=26.753246307373047, executed_events=0, cleared=false
+attempt 305: best=26.753246307373047, executed_events=0, cleared=false
+attempt 306: best=26.753246307373047, executed_events=0, cleared=false
+attempt 307: best=26.82291603088379, executed_events=0, cleared=false
+attempt 308: best=26.82291603088379, executed_events=0, cleared=false
+attempt 309: best=26.82291603088379, executed_events=0, cleared=false
+attempt 310: best=26.718547821044922, executed_events=0, cleared=false
+attempt 311: best=26.718547821044922, executed_events=0, cleared=false
+attempt 312: best=26.718547821044922, executed_events=0, cleared=false
+```

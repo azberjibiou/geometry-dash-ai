@@ -125,6 +125,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--require-progress-tick", type=int)
     parser.add_argument("--require-progress-percent-min", type=float)
 
+    parser.add_argument(
+        "--reward-style",
+        choices=("progress", "picklegawd"),
+        default="progress",
+        help="reward formula to use for candidate scoring",
+    )
     parser.add_argument("--progress-scale", type=float, default=1.0)
     parser.add_argument("--best-progress-bonus-scale", type=float, default=0.5)
     parser.add_argument("--section-size-percent", type=float, default=10.0)
@@ -133,6 +139,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--death-penalty", type=float, default=10.0)
     parser.add_argument("--excessive-input-free-events", type=int, default=0)
     parser.add_argument("--excessive-input-penalty", type=float, default=0.0)
+    parser.add_argument("--default-reward", type=float, default=0.01)
+    parser.add_argument("--jump-punishment", type=float, default=0.0)
+    parser.add_argument("--checkpoint-reward", type=float, default=0.0)
+    parser.add_argument("--checkpoint-size-percent", type=float, default=3.0)
 
     args = parser.parse_args(argv)
 

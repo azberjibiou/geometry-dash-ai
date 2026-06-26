@@ -105,6 +105,36 @@ def test_load_image_dataset_reads_frame_stacks_features_and_labels(tmp_path) -> 
     assert loaded[0].frame_stack[1].pixels[0] == pytest.approx((0.299, 0.587))
 
 
+def test_load_image_dataset_can_use_target_input_down_labels(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    capture_dir = tmp_path / "capture"
+    frames_dir = capture_dir / "frames"
+    _write_bmp_rows(frames_dir / "frame.bmp", [[(0, 0, 0)]])
+    samples_path = tmp_path / "samples.jsonl"
+    _write_samples(
+        samples_path,
+        [
+            _sample(
+                frame_paths=("frames/frame.bmp",),
+                input_down=False,
+                target_input_down=True,
+            )
+        ],
+    )
+
+    loaded = load_image_dataset(
+        samples_path,
+        frame_base_dir=capture_dir,
+        config=ImageDatasetConfig(
+            image_width=1,
+            image_height=1,
+            label_mode="target_input_down",
+        ),
+    )
+
+    assert loaded[0].scalar_features == pytest.approx((0.0, 0.0))
+    assert loaded[0].labels == pytest.approx((1.0,))
+
+
 def test_load_image_dataset_can_pad_short_frame_stacks(tmp_path) -> None:  # type: ignore[no-untyped-def]
     capture_dir = tmp_path / "capture"
     frames_dir = capture_dir / "frames"
@@ -171,6 +201,7 @@ def _sample(
     frame_paths: tuple[str, ...],
     progress: float = 0.0,
     input_down: bool = False,
+    target_input_down: bool | None = None,
     press_event: bool = False,
     release_event: bool = False,
 ) -> ImitationSample:
@@ -182,6 +213,9 @@ def _sample(
         frame_paths=frame_paths,
         progress=progress,
         input_down=input_down,
+        target_input_down=input_down
+        if target_input_down is None
+        else target_input_down,
         x=10.0,
         y=0.0,
         x_vel=1.0,

@@ -31,6 +31,8 @@ class AttemptResult:
     intended_event_count: int
     executed_event_count: int
     dropped_event_count: int
+    trace_input_events_path: str | None = None
+    trace_input_event_count: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

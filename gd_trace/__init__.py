@@ -8,6 +8,11 @@ from gd_trace.humanized_run import (
     NumericDistribution,
     summarize_humanized_attempts,
 )
+from gd_trace.input_macro import (
+    TRACE_INPUT_MACRO_KIND,
+    trace_input_events,
+    trace_input_macro,
+)
 from gd_trace.load_trace import load_macro_json, load_trace_jsonl
 from gd_trace.macro_schema import Macro, MacroSchemaError
 from gd_trace.replay_check import (
@@ -34,6 +39,7 @@ __all__ = [
     "NumericDistribution",
     "ObservedInputTransition",
     "ReplayCheckSummary",
+    "TRACE_INPUT_MACRO_KIND",
     "TraceComparison",
     "TraceRow",
     "TraceSchemaError",
@@ -48,4 +54,6 @@ __all__ = [
     "summarize_input_latency",
     "summarize_macro_applications",
     "summarize_replay_check",
+    "trace_input_events",
+    "trace_input_macro",
 ]

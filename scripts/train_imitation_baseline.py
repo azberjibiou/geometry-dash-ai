@@ -30,6 +30,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument("--frame-base-dir", type=Path)
     parser.add_argument(
+        "--target",
+        choices=("events", "target-input-down"),
+        default="events",
+        help="train press/release event labels or future input_down state labels",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         help="defaults to DATASET_PARENT/imitation_baseline_<timestamp>",
@@ -58,6 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         config = BaselineTrainingConfig(
+            target=_target_value(args.target),
             image_width=args.image_width,
             image_height=args.image_height,
             frame_stack_size=args.frame_stack_size,
@@ -95,29 +102,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     metrics = result["metrics"]
+    output = {
+        "output_dir": str(output_dir),
+        "metrics_json": str(result["metrics_path"]),
+        "predictions_jsonl": str(result["predictions_path"]),
+        "checkpoint": str(result["checkpoint_path"])
+        if result["checkpoint_path"] is not None
+        else None,
+        "target": metrics["dataset"]["target"],
+        "sample_count": metrics["dataset"]["sample_count"],
+        "train_count": metrics["dataset"]["train_count"],
+        "validation_count": metrics["dataset"]["validation_count"],
+        "initial_loss": metrics["training"]["initial_loss"],
+        "final_loss": metrics["training"]["final_loss"],
+    }
+    for optional_key in (
+        "predicted_event_ticks",
+        "top_event_ticks",
+        "labeled_event_ticks",
+        "predicted_state_ticks",
+        "labeled_state_ticks",
+    ):
+        if optional_key in metrics:
+            output[optional_key] = metrics[optional_key]
     print(
         json.dumps(
-            {
-                "output_dir": str(output_dir),
-                "metrics_json": str(result["metrics_path"]),
-                "predictions_jsonl": str(result["predictions_path"]),
-                "checkpoint": str(result["checkpoint_path"])
-                if result["checkpoint_path"] is not None
-                else None,
-                "sample_count": metrics["dataset"]["sample_count"],
-                "train_count": metrics["dataset"]["train_count"],
-                "validation_count": metrics["dataset"]["validation_count"],
-                "initial_loss": metrics["training"]["initial_loss"],
-                "final_loss": metrics["training"]["final_loss"],
-                "predicted_event_ticks": metrics["predicted_event_ticks"],
-                "top_event_ticks": metrics["top_event_ticks"],
-                "labeled_event_ticks": metrics["labeled_event_ticks"],
-            },
+            output,
             indent=2,
             sort_keys=True,
         )
     )
     return 0
+
+
+def _target_value(raw: str) -> str:
+    if raw == "target-input-down":
+        return "target_input_down"
+    return raw
 
 
 if __name__ == "__main__":

@@ -51,27 +51,33 @@ def test_practice_runner_persists_intended_executed_trace_and_summaries(
     attempt_dir = config.output_dir / "attempt_001"
     intended_path = attempt_dir / "policy_intended_events.json"
     executed_path = attempt_dir / "human_executed_events.json"
+    trace_input_path = attempt_dir / "trace_input_events.json"
     humanization_path = attempt_dir / "humanization_details.json"
     trace_path = attempt_dir / "trace.jsonl"
     attempt_summary_path = attempt_dir / "summary.json"
 
     assert intended_path.exists()
     assert executed_path.exists()
+    assert trace_input_path.exists()
     assert humanization_path.exists()
     assert trace_path.exists()
     assert attempt_summary_path.exists()
 
     intended = load_macro_json(intended_path)
     executed = load_macro_json(executed_path)
+    trace_input = load_macro_json(trace_input_path)
     trace = load_trace_jsonl(trace_path)
 
     assert intended.metadata["kind"] == "policy_intent"
     assert executed.metadata["kind"] == "human_executed_input"
+    assert trace_input.metadata["kind"] == "trace_observed_input"
     assert intended.events == [Event(10, "press"), Event(20, "release")]
     assert executed.events == intended.events
+    assert trace_input.events == []
     assert trace[-1].percent == 25.0
     assert summary.attempts[0].intended_event_count == 2
     assert summary.attempts[0].executed_event_count == 2
+    assert summary.attempts[0].trace_input_event_count == 0
     assert summary.attempts[0].dropped_event_count == 0
 
 

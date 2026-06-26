@@ -24,6 +24,7 @@ class ImitationBaselineError(ValueError):
 class BaselineTrainingConfig:
     """Configuration for the first tiny image-backed imitation baseline."""
 
+    target: str = "events"
     image_width: int = 84
     image_height: int = 84
     frame_stack_size: int = 4
@@ -44,6 +45,10 @@ class BaselineTrainingConfig:
     def __post_init__(self) -> None:
         if self.image_width <= 0:
             raise ImitationBaselineError("image_width must be positive")
+        if self.target not in ("events", "target_input_down"):
+            raise ImitationBaselineError(
+                "target must be 'events' or 'target_input_down'"
+            )
         if self.image_height <= 0:
             raise ImitationBaselineError("image_height must be positive")
         if self.frame_stack_size <= 0:
@@ -88,6 +93,7 @@ def train_baseline_from_dataset_dir(
             image_height=effective_config.image_height,
             required_frame_stack_size=effective_config.frame_stack_size,
             progress_scale=effective_config.progress_scale,
+            label_mode=effective_config.target,
         ),
     )
     split = load_or_create_split(
@@ -163,6 +169,7 @@ def predict_baseline_from_checkpoint(
             image_height=config.image_height,
             required_frame_stack_size=config.frame_stack_size,
             progress_scale=config.progress_scale,
+            label_mode=config.target,
         ),
     )
     if not samples:
@@ -176,6 +183,13 @@ def predict_baseline_from_checkpoint(
             f"checkpoint input_dim {expected_input_dim} does not match "
             f"dataset input_dim {input_dim}"
         )
+    output_dim = _validate_labels([sample.labels for sample in samples])
+    expected_output_dim = checkpoint.get("output_dim", 2)
+    if expected_output_dim != output_dim:
+        raise ImitationBaselineError(
+            f"checkpoint output_dim {expected_output_dim} does not match "
+            f"dataset output_dim {output_dim}"
+        )
 
     state_dict = checkpoint.get("model_state_dict")
     if not isinstance(state_dict, Mapping):
@@ -186,6 +200,7 @@ def predict_baseline_from_checkpoint(
         torch,
         input_dim=input_dim,
         hidden_size=config.hidden_size,
+        output_dim=output_dim,
     ).to(torch.device(device))
     model.load_state_dict(state_dict)
     model.eval()
@@ -206,6 +221,7 @@ def predict_baseline_from_checkpoint(
         train_indices=set(split["train_indices"]),
         validation_indices=set(split["validation_indices"]),
         threshold=config.threshold,
+        target=config.target,
     )
 
 
@@ -281,6 +297,7 @@ def train_imitation_baseline(
     features = [_feature_vector(sample) for sample in sample_list]
     input_dim = _validate_feature_vectors(features)
     labels = [list(sample.labels) for sample in sample_list]
+    output_dim = _validate_labels(labels)
     device = torch.device(effective_config.device)
 
     feature_tensor = torch.tensor(features, dtype=torch.float32, device=device)
@@ -300,6 +317,7 @@ def train_imitation_baseline(
         torch,
         input_dim=input_dim,
         hidden_size=effective_config.hidden_size,
+        output_dim=output_dim,
     ).to(device)
     pos_weight = _positive_weights(torch, label_tensor[train_tensor])
     criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -345,6 +363,7 @@ def train_imitation_baseline(
         train_indices=set(train_index_tuple),
         validation_indices=set(validation_index_tuple),
         threshold=effective_config.threshold,
+        target=effective_config.target,
     )
     metrics = _metrics_report(
         samples=sample_list,
@@ -355,6 +374,7 @@ def train_imitation_baseline(
         validation_loss=validation_loss,
         train_loss_history=train_loss_history,
         input_dim=input_dim,
+        output_dim=output_dim,
         config=effective_config,
     )
 
@@ -365,6 +385,7 @@ def train_imitation_baseline(
             "backend": "torch",
             "config": asdict(effective_config),
             "input_dim": input_dim,
+            "output_dim": output_dim,
             "model_state_dict": model.state_dict(),
         },
     }
@@ -418,11 +439,17 @@ def binary_classification_metrics(
     }
 
 
-def _build_model(torch: Any, *, input_dim: int, hidden_size: int) -> Any:
+def _build_model(
+    torch: Any,
+    *,
+    input_dim: int,
+    hidden_size: int,
+    output_dim: int,
+) -> Any:
     return torch.nn.Sequential(
         torch.nn.Linear(input_dim, hidden_size),
         torch.nn.ReLU(),
-        torch.nn.Linear(hidden_size, 2),
+        torch.nn.Linear(hidden_size, output_dim),
     )
 
 
@@ -470,6 +497,21 @@ def _validate_feature_vectors(features: Sequence[Sequence[float]]) -> int:
     return input_dim
 
 
+def _validate_labels(labels: Sequence[Sequence[float]]) -> int:
+    if not labels:
+        raise ImitationBaselineError("dataset contains no labels")
+    output_dim = len(labels[0])
+    if output_dim == 0:
+        raise ImitationBaselineError("label vectors are empty")
+    for index, label in enumerate(labels):
+        if len(label) != output_dim:
+            raise ImitationBaselineError(
+                f"sample {index} has label length {len(label)}; "
+                f"expected {output_dim}"
+            )
+    return output_dim
+
+
 def _positive_weights(torch: Any, train_labels: Any) -> Any:
     positive_counts = train_labels.sum(dim=0)
     negative_counts = train_labels.shape[0] - positive_counts
@@ -498,8 +540,10 @@ def _prediction_rows(
     train_indices: set[int],
     validation_indices: set[int],
     threshold: float,
+    target: str,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    label_names = _label_names(target)
     for position, (sample, sample_logits, sample_probs) in enumerate(
         zip(samples, logits, probabilities)
     ):
@@ -510,8 +554,18 @@ def _prediction_rows(
             if position in validation_indices
             else "unused"
         )
-        press_probability = float(sample_probs[0])
-        release_probability = float(sample_probs[1])
+        labels = {
+            label_name: bool(sample.labels[label_index])
+            for label_index, label_name in enumerate(label_names)
+        }
+        probability_values = {
+            label_name: float(sample_probs[label_index])
+            for label_index, label_name in enumerate(label_names)
+        }
+        logit_values = {
+            label_name: float(sample_logits[label_index])
+            for label_index, label_name in enumerate(label_names)
+        }
         rows.append(
             {
                 "position": position,
@@ -521,21 +575,13 @@ def _prediction_rows(
                 "split": split,
                 "progress": sample.sample.progress,
                 "input_down": sample.sample.input_down,
-                "labels": {
-                    "press_event": bool(sample.labels[0]),
-                    "release_event": bool(sample.labels[1]),
-                },
-                "logits": {
-                    "press_event": float(sample_logits[0]),
-                    "release_event": float(sample_logits[1]),
-                },
-                "probabilities": {
-                    "press_event": press_probability,
-                    "release_event": release_probability,
-                },
+                "target_input_down": sample.sample.target_input_down,
+                "labels": labels,
+                "logits": logit_values,
+                "probabilities": probability_values,
                 "predicted": {
-                    "press_event": press_probability >= threshold,
-                    "release_event": release_probability >= threshold,
+                    label_name: probability >= threshold
+                    for label_name, probability in probability_values.items()
                 },
             }
         )
@@ -552,21 +598,31 @@ def _metrics_report(
     validation_loss: float | None,
     train_loss_history: Sequence[float],
     input_dim: int,
+    output_dim: int,
     config: BaselineTrainingConfig,
 ) -> dict[str, Any]:
     train_index_set = set(train_indices)
     validation_index_set = set(validation_indices)
     all_indices = tuple(range(len(samples)))
-    return {
+    label_names = _label_names(config.target)
+    report = {
         "backend": "torch",
         "config": asdict(config),
         "dataset": {
+            "target": config.target,
             "sample_count": len(samples),
             "train_count": len(train_indices),
             "validation_count": len(validation_indices),
             "input_dim": input_dim,
-            "press_label_count": sum(1 for sample in samples if sample.labels[0]),
-            "release_label_count": sum(1 for sample in samples if sample.labels[1]),
+            "output_dim": output_dim,
+            "label_positive_counts": {
+                label_name: sum(
+                    1
+                    for sample in samples
+                    if bool(sample.labels[label_index])
+                )
+                for label_index, label_name in enumerate(label_names)
+            },
             "first_tick": samples[0].sample.tick if samples else None,
             "last_tick": samples[-1].sample.tick if samples else None,
         },
@@ -576,56 +632,106 @@ def _metrics_report(
             "train_loss": train_loss,
             "validation_loss": validation_loss,
         },
-        "train": _subset_metrics(predictions, train_index_set),
-        "validation": _subset_metrics(predictions, validation_index_set),
-        "all": _subset_metrics(predictions, set(all_indices)),
-        "predicted_event_ticks": {
-            "press": [
-                int(row["tick"])
-                for row in predictions
-                if row["predicted"]["press_event"]
-            ],
-            "release": [
-                int(row["tick"])
-                for row in predictions
-                if row["predicted"]["release_event"]
-            ],
-        },
-        "top_event_ticks": {
-            "press": _top_event_ticks(predictions, "press_event"),
-            "release": _top_event_ticks(predictions, "release_event"),
-        },
-        "labeled_event_ticks": {
-            "press": [
-                sample.sample.tick for sample in samples if sample.labels[0]
-            ],
-            "release": [
-                sample.sample.tick for sample in samples if sample.labels[1]
-            ],
-        },
-        "event_neighborhoods": _event_neighborhoods(
+        "train": _subset_metrics(
             predictions,
-            radius=config.event_window_radius,
+            train_index_set,
+            label_names=label_names,
+        ),
+        "validation": _subset_metrics(
+            predictions,
+            validation_index_set,
+            label_names=label_names,
+        ),
+        "all": _subset_metrics(
+            predictions,
+            set(all_indices),
+            label_names=label_names,
         ),
     }
+    if config.target == "events":
+        report["dataset"]["press_label_count"] = report["dataset"][
+            "label_positive_counts"
+        ]["press_event"]
+        report["dataset"]["release_label_count"] = report["dataset"][
+            "label_positive_counts"
+        ]["release_event"]
+        report.update(
+            {
+                "predicted_event_ticks": {
+                    "press": [
+                        int(row["tick"])
+                        for row in predictions
+                        if row["predicted"]["press_event"]
+                    ],
+                    "release": [
+                        int(row["tick"])
+                        for row in predictions
+                        if row["predicted"]["release_event"]
+                    ],
+                },
+                "top_event_ticks": {
+                    "press": _top_event_ticks(predictions, "press_event"),
+                    "release": _top_event_ticks(predictions, "release_event"),
+                },
+                "labeled_event_ticks": {
+                    "press": [
+                        sample.sample.tick for sample in samples if sample.labels[0]
+                    ],
+                    "release": [
+                        sample.sample.tick for sample in samples if sample.labels[1]
+                    ],
+                },
+                "event_neighborhoods": _event_neighborhoods(
+                    predictions,
+                    radius=config.event_window_radius,
+                ),
+            }
+        )
+    else:
+        report["dataset"]["target_input_down_label_count"] = report["dataset"][
+            "label_positive_counts"
+        ]["target_input_down"]
+        report["predicted_state_ticks"] = [
+            int(row["tick"])
+            for row in predictions
+            if row["predicted"]["target_input_down"]
+        ]
+        report["labeled_state_ticks"] = [
+            sample.sample.tick for sample in samples if sample.labels[0]
+        ]
+    return report
 
 
 def _subset_metrics(
     predictions: Sequence[Mapping[str, Any]],
     positions: set[int],
+    *,
+    label_names: Sequence[str],
 ) -> dict[str, Any]:
     rows = [row for row in predictions if int(row["position"]) in positions]
-    return {
-        "count": len(rows),
-        "press": binary_classification_metrics(
-            actual=[bool(row["labels"]["press_event"]) for row in rows],
-            predicted=[bool(row["predicted"]["press_event"]) for row in rows],
-        ),
-        "release": binary_classification_metrics(
-            actual=[bool(row["labels"]["release_event"]) for row in rows],
-            predicted=[bool(row["predicted"]["release_event"]) for row in rows],
-        ),
-    }
+    metrics: dict[str, Any] = {"count": len(rows)}
+    for label_name in label_names:
+        metrics[_metric_name(label_name)] = binary_classification_metrics(
+            actual=[bool(row["labels"][label_name]) for row in rows],
+            predicted=[bool(row["predicted"][label_name]) for row in rows],
+        )
+    return metrics
+
+
+def _label_names(target: str) -> tuple[str, ...]:
+    if target == "events":
+        return ("press_event", "release_event")
+    if target == "target_input_down":
+        return ("target_input_down",)
+    raise ImitationBaselineError(f"unsupported target {target!r}")
+
+
+def _metric_name(label_name: str) -> str:
+    if label_name == "press_event":
+        return "press"
+    if label_name == "release_event":
+        return "release"
+    return label_name
 
 
 def _event_neighborhoods(

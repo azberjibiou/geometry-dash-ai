@@ -193,6 +193,9 @@ def _summarize_samples(
             1 for sample in samples if sample.press_event or sample.release_event
         ),
         "input_down_count": sum(1 for sample in samples if sample.input_down),
+        "target_input_down_count": sum(
+            1 for sample in samples if sample.target_input_down
+        ),
         "dead_count": sum(1 for sample in samples if sample.dead),
         "min_progress": min(sample.progress for sample in samples),
         "max_progress": max(sample.progress for sample in samples),

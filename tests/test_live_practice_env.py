@@ -6,7 +6,7 @@ import pytest
 import gd_rl.live_env as live_env_module
 from gd_env import BridgeDiagnostic, BridgeObservation
 from gd_human_model import Event, HumanProfile
-from gd_rl import IntendedAction, LivePracticeEnv, LivePracticeEnvConfig
+from gd_rl import IntendedAction, LivePracticeEnv, LivePracticeEnvConfig, RewardConfig
 from gd_trace import load_macro_json, load_trace_jsonl
 
 
@@ -67,6 +67,76 @@ class FakeLiveGeodeClient:
 
     def send_event(self, event: Event) -> None:
         self.sent_events.append(event)
+
+
+class ResetSequenceFakeLiveGeodeClient(FakeLiveGeodeClient):
+    def __init__(
+        self,
+        *,
+        reset_observations: list[BridgeObservation],
+        observations: list[BridgeObservation],
+    ) -> None:
+        super().__init__(observations)
+        if not reset_observations:
+            raise ValueError("reset_observations must be non-empty")
+        self.reset_observations = reset_observations
+        self.reset_index = 0
+
+    def reset_attempt(
+        self,
+        reason: str = "requested",
+        *,
+        max_observations: int = 600,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> BridgeObservation:
+        self.index = 0
+        self.reset_reasons.append(reason)
+        if diagnostics is not None:
+            diagnostics.append(
+                BridgeDiagnostic(
+                    kind="fake_reset",
+                    tick=0,
+                    data={"reason": reason, "max_observations": max_observations},
+                )
+            )
+        reset_index = min(self.reset_index, len(self.reset_observations) - 1)
+        self.reset_index += 1
+        return self.reset_observations[reset_index]
+
+
+class MacroAwareFakeLiveGeodeClient(FakeLiveGeodeClient):
+    def __init__(self, observations: list[BridgeObservation]) -> None:
+        super().__init__(observations)
+        self.loaded_macros: list[dict[str, object]] = []
+        self.call_order: list[str] = []
+
+    def load_macro(
+        self,
+        events: list[Event],
+        *,
+        metadata: dict[str, object] | None = None,
+        max_messages: int = 600,
+    ) -> object:
+        del max_messages
+        self.call_order.append("load_macro")
+        self.loaded_macros.append(
+            {"events": list(events), "metadata": dict(metadata or {})}
+        )
+        return object()
+
+    def reset_attempt(
+        self,
+        reason: str = "requested",
+        *,
+        max_observations: int = 600,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> BridgeObservation:
+        self.call_order.append("reset_attempt")
+        return super().reset_attempt(
+            reason,
+            max_observations=max_observations,
+            diagnostics=diagnostics,
+        )
 
 
 def test_live_env_humanizes_intent_before_dispatching_input(tmp_path: Path) -> None:
@@ -179,6 +249,116 @@ def test_live_env_returns_delayed_policy_observation_and_persists_terminal_attem
     assert diagnostics["executor"] == "geode_live_step"
 
 
+def test_live_env_persists_replayable_trace_input_events(tmp_path: Path) -> None:
+    fake_client = FakeLiveGeodeClient(
+        [
+            _observation(0, percent=0.0, input_down=False),
+            _observation(1, percent=10.0, input_down=False),
+            _observation(2, percent=20.0, input_down=True),
+            _observation(3, percent=30.0, input_down=True),
+            _observation(4, percent=40.0, input_down=False, dead=True),
+        ]
+    )
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="trace_input_fixture",
+            output_dir=tmp_path,
+            max_steps=5,
+            success_percent=100.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+
+    with env:
+        env.reset(attempt_index=1)
+        while True:
+            step = env.step(IntendedAction.no_op(0))
+            if step.done:
+                break
+
+    attempt_dir = tmp_path / "attempt_001"
+    trace_input_macro = load_macro_json(attempt_dir / "trace_input_events.json")
+    summary = json.loads((attempt_dir / "summary.json").read_text(encoding="utf-8"))
+
+    assert trace_input_macro.metadata["kind"] == "trace_observed_input"
+    assert trace_input_macro.events == [Event(2, "press"), Event(4, "release")]
+    assert summary["trace_input_events_path"].endswith("trace_input_events.json")
+    assert summary["trace_input_event_count"] == 2
+
+
+def test_live_env_can_use_picklegawd_step_reward(tmp_path: Path) -> None:
+    fake_client = FakeLiveGeodeClient(
+        [
+            _observation(0, percent=0.0, input_down=False),
+            _observation(1, percent=1.0, input_down=True),
+            _observation(2, percent=2.0, input_down=True, dead=True),
+        ]
+    )
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="picklegawd_reward_fixture",
+            output_dir=tmp_path,
+            max_steps=3,
+            success_percent=100.0,
+            reward_config=RewardConfig(reward_style="picklegawd"),
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+
+    with env:
+        env.reset(attempt_index=1)
+        hold_step = env.step(IntendedAction.press(0))
+        death_step = env.step(IntendedAction.no_op(1))
+
+    assert hold_step.reward == 1.51
+    assert hold_step.info["reward_terms"]["progress_delta"] == 1.0
+    assert hold_step.info["reward_terms"]["best_progress_bonus"] == 0.5
+    assert hold_step.info["reward_terms"]["default_reward"] == 0.01
+    assert hold_step.info["reward_terms"]["jump_punishment"] == 0.0
+    assert death_step.reward == -8.5
+    assert death_step.info["reward_terms"]["progress_delta"] == 1.0
+    assert death_step.info["reward_terms"]["best_progress_bonus"] == 0.5
+    assert death_step.info["reward_terms"]["death_penalty"] == -10.0
+
+
+def test_live_env_clears_stale_queued_macro_before_reset(tmp_path: Path) -> None:
+    fake_client = MacroAwareFakeLiveGeodeClient(
+        [_observation(tick, percent=float(tick * 10)) for tick in range(2)]
+    )
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="clear_stale_macro_fixture",
+            output_dir=tmp_path,
+            max_steps=1,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+
+    with env:
+        env.reset(attempt_index=1)
+
+    diagnostics = json.loads(
+        (tmp_path / "attempt_001" / "geode_diagnostics.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert fake_client.call_order[:2] == ["load_macro", "reset_attempt"]
+    assert fake_client.loaded_macros == [
+        {
+            "events": [],
+            "metadata": {
+                "source": "live_step_env",
+                "purpose": "clear_stale_queued_macro",
+            },
+        }
+    ]
+    assert diagnostics["diagnostics"][0]["kind"] == "live_queued_macro_cleared"
+
+
 def test_live_env_only_waits_after_clear_not_death(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -239,6 +419,16 @@ def test_live_env_only_waits_after_clear_not_death(
     assert clear_step.info["termination_reason"] == "clear"
     assert clear_step.info["attempt_result"]["cleared"] is True
     assert sleeps == [5.0]
+    clear_diagnostics = json.loads(
+        (tmp_path / "clear" / "attempt_001" / "geode_diagnostics.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert any(
+        diagnostic["kind"] == "live_post_terminal_delay"
+        and diagnostic["data"]["delay_seconds"] == 5.0
+        for diagnostic in clear_diagnostics["diagnostics"]
+    )
 
 
 def test_live_env_reports_max_steps_as_truncation(tmp_path: Path) -> None:
@@ -272,6 +462,42 @@ def test_live_env_reports_max_steps_as_truncation(tmp_path: Path) -> None:
     assert step.info["termination_reason"] is None
     assert step.info["attempt_result"]["death_tick"] is None
     assert step.info["attempt_result"]["cleared"] is False
+
+
+def test_live_env_allows_zero_max_steps_to_disable_truncation(
+    tmp_path: Path,
+) -> None:
+    fake_client = FakeLiveGeodeClient(
+        [
+            _observation(0, percent=0.0),
+            _observation(1, percent=10.0),
+            _observation(2, percent=20.0, dead=True),
+        ]
+    )
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="no_max_steps_fixture",
+            output_dir=tmp_path,
+            max_steps=0,
+            success_percent=100.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+
+    with env:
+        env.reset(attempt_index=1)
+        first_step = env.step(IntendedAction.no_op(0))
+        terminal_step = env.step(IntendedAction.no_op(1))
+
+    assert first_step.done is False
+    assert first_step.truncated is False
+    assert first_step.info["max_steps_reached"] is False
+    assert terminal_step.done is True
+    assert terminal_step.terminated is True
+    assert terminal_step.truncated is False
+    assert terminal_step.info["max_steps_reached"] is False
+    assert terminal_step.info["termination_reason"] == "death"
 
 
 def test_live_env_treats_tick_rewind_as_terminal_death(tmp_path: Path) -> None:
@@ -340,6 +566,65 @@ def test_live_env_start_guard_rejects_wrong_start(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="fresh start check failed"):
+        env.reset(attempt_index=1)
+
+
+def test_live_env_start_guard_retries_completed_start_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(live_env_module.time, "sleep", sleeps.append)
+    fake_client = ResetSequenceFakeLiveGeodeClient(
+        reset_observations=[
+            _observation(0, percent=0.0, completed=True),
+            _observation(0, percent=0.0),
+        ],
+        observations=[
+            _observation(0, percent=0.0),
+            _observation(1, percent=10.0),
+        ],
+    )
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="local_step_fixture",
+            output_dir=tmp_path,
+            start_guard_reset_retries=1,
+            start_guard_retry_delay_seconds=1.0,
+            post_terminal_delay_seconds=8.0,
+            require_start_percent_max=2.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+
+    with env:
+        initial = env.reset(attempt_index=1)
+
+    assert initial.latest.completed is False
+    assert fake_client.reset_reasons == [
+        "live_practice_attempt_1",
+        "live_practice_attempt_1",
+    ]
+    assert sleeps == [8.0]
+
+
+def test_live_env_start_guard_rejects_completed_start_without_retry(
+    tmp_path: Path,
+) -> None:
+    fake_client = FakeLiveGeodeClient(
+        [_observation(0, percent=0.0, completed=True)]
+    )
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="local_step_fixture",
+            output_dir=tmp_path,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+
+    with pytest.raises(ValueError, match="already completed"):
         env.reset(attempt_index=1)
 
 

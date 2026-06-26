@@ -85,6 +85,51 @@ def test_train_imitation_baseline_writes_metrics_and_predictions(tmp_path) -> No
     assert {row["split"] for row in predictions} == {"train", "validation"}
 
 
+def test_train_imitation_baseline_can_target_future_input_down(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    pytest.importorskip("torch")
+    dataset_dir = _write_tiny_dataset(tmp_path)
+    output_dir = tmp_path / "state_baseline"
+
+    exit_code = main(
+        [
+            "--dataset-dir",
+            str(dataset_dir),
+            "--output-dir",
+            str(output_dir),
+            "--target",
+            "target-input-down",
+            "--image-width",
+            "1",
+            "--image-height",
+            "1",
+            "--frame-stack-size",
+            "1",
+            "--hidden-size",
+            "4",
+            "--epochs",
+            "10",
+            "--learning-rate",
+            "0.05",
+            "--seed",
+            "123",
+        ]
+    )
+
+    assert exit_code == 0
+    metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
+    predictions_path = output_dir / "predictions.jsonl"
+    predictions = [
+        json.loads(line)
+        for line in predictions_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert metrics["dataset"]["target"] == "target_input_down"
+    assert metrics["dataset"]["output_dim"] == 1
+    assert metrics["dataset"]["target_input_down_label_count"] == 2
+    assert "target_input_down" in metrics["all"]
+    assert set(predictions[0]["probabilities"]) == {"target_input_down"}
+
+
 def test_training_is_deterministic_for_fixed_seed(tmp_path) -> None:  # type: ignore[no-untyped-def]
     pytest.importorskip("torch")
     dataset_dir = _write_tiny_dataset(tmp_path)
@@ -238,6 +283,7 @@ def _sample(
         frame_paths=(frame_path,),
         progress=float(index),
         input_down=False,
+        target_input_down=press_event or (index == 3),
         x=float(index),
         y=0.0,
         x_vel=1.0,

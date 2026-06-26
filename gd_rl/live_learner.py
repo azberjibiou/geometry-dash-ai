@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import random
-from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, Sequence
@@ -172,8 +171,10 @@ class DQNConfig:
     attempts: int = 1
     gamma: float = 0.99
     learning_rate: float = 1e-3
-    epsilon_start: float = 0.20
-    epsilon_end: float = 0.05
+    epsilon_schedule: Literal["linear", "picklegawd"] = "picklegawd"
+    epsilon_start: float = 1.0
+    epsilon_end: float = 0.01
+    epsilon_decay_rate: float = 0.995
     epsilon_decay_steps: int = 1000
     batch_size: int = 32
     replay_capacity: int = 2048
@@ -193,6 +194,9 @@ class DQNConfig:
     eval_attempts: int = 0
     eval_interval_attempts: int = 0
     skip_replay_death_reasons: tuple[str, ...] = ("tick_rewind_reset",)
+    success_replay_fraction: float = 0.25
+    terminal_replay_fraction: float = 0.25
+    success_reward_threshold: float = 50.0
 
     def __post_init__(self) -> None:
         if self.attempts <= 0:
@@ -201,10 +205,16 @@ class DQNConfig:
             raise LiveLearnerError("gamma must be between 0 and 1")
         if self.learning_rate <= 0.0:
             raise LiveLearnerError("learning_rate must be positive")
+        if self.epsilon_schedule not in {"linear", "picklegawd"}:
+            raise LiveLearnerError(
+                "epsilon_schedule must be 'linear' or 'picklegawd'"
+            )
         if not 0.0 <= self.epsilon_start <= 1.0:
             raise LiveLearnerError("epsilon_start must be between 0 and 1")
         if not 0.0 <= self.epsilon_end <= 1.0:
             raise LiveLearnerError("epsilon_end must be between 0 and 1")
+        if not 0.0 < self.epsilon_decay_rate <= 1.0:
+            raise LiveLearnerError("epsilon_decay_rate must be in (0, 1]")
         if self.epsilon_decay_steps <= 0:
             raise LiveLearnerError("epsilon_decay_steps must be positive")
         if self.batch_size <= 0:
@@ -241,6 +251,16 @@ class DQNConfig:
             raise LiveLearnerError("eval_interval_attempts must be non-negative")
         if any(not reason for reason in self.skip_replay_death_reasons):
             raise LiveLearnerError("skip_replay_death_reasons cannot contain empty values")
+        if not 0.0 <= self.success_replay_fraction <= 1.0:
+            raise LiveLearnerError("success_replay_fraction must be between 0 and 1")
+        if not 0.0 <= self.terminal_replay_fraction <= 1.0:
+            raise LiveLearnerError("terminal_replay_fraction must be between 0 and 1")
+        if self.success_replay_fraction + self.terminal_replay_fraction > 1.0:
+            raise LiveLearnerError(
+                "success_replay_fraction + terminal_replay_fraction must be <= 1"
+            )
+        if self.success_reward_threshold <= 0.0:
+            raise LiveLearnerError("success_reward_threshold must be positive")
 
 
 @dataclass(slots=True)
@@ -949,6 +969,8 @@ class DQNTransition:
     truncated: bool = False
     aborted: bool = False
     discount: float | None = None
+    contains_clear_bonus: bool = False
+    terminal_kind: str = "none"
 
     def __post_init__(self) -> None:
         terminated = self.terminated
@@ -971,15 +993,75 @@ class DQNReplayBuffer:
         if capacity <= 0:
             raise LiveLearnerError("replay buffer capacity must be positive")
         self.capacity = capacity
-        self._items: deque[DQNTransition] = deque(maxlen=capacity)
+        self._items: list[DQNTransition] = []
+        self._next_index = 0
 
     def append(self, transition: DQNTransition) -> None:
-        self._items.append(transition)
+        if len(self._items) < self.capacity:
+            self._items.append(transition)
+        else:
+            self._items[self._next_index] = transition
+        self._next_index = (self._next_index + 1) % self.capacity
 
-    def sample(self, batch_size: int) -> list[DQNTransition]:
+    def sample(
+        self,
+        batch_size: int,
+        *,
+        success_fraction: float = 0.0,
+        terminal_fraction: float = 0.0,
+        success_reward_threshold: float = 50.0,
+    ) -> list[DQNTransition]:
         if batch_size <= 0:
             raise LiveLearnerError("batch_size must be positive")
-        return random.sample(list(self._items), batch_size)
+        if not 0.0 <= success_fraction <= 1.0:
+            raise LiveLearnerError("success_fraction must be between 0 and 1")
+        if not 0.0 <= terminal_fraction <= 1.0:
+            raise LiveLearnerError("terminal_fraction must be between 0 and 1")
+        if success_fraction + terminal_fraction > 1.0:
+            raise LiveLearnerError(
+                "success_fraction + terminal_fraction must be <= 1"
+            )
+        if success_reward_threshold <= 0.0:
+            raise LiveLearnerError("success_reward_threshold must be positive")
+
+        selected: list[DQNTransition] = []
+        selected_ids: set[int] = set()
+
+        def draw(pool: Sequence[DQNTransition], count: int) -> None:
+            remaining_slots = batch_size - len(selected)
+            if count <= 0 or remaining_slots <= 0:
+                return
+            candidates = [
+                transition
+                for transition in pool
+                if id(transition) not in selected_ids
+            ]
+            sample_count = min(count, remaining_slots, len(candidates))
+            if sample_count <= 0:
+                return
+            for transition in random.sample(candidates, sample_count):
+                selected.append(transition)
+                selected_ids.add(id(transition))
+
+        success_count = int(round(batch_size * success_fraction))
+        terminal_count = int(round(batch_size * terminal_fraction))
+        success_pool = [
+            transition
+            for transition in self._items
+            if transition.contains_clear_bonus
+            or transition.reward >= success_reward_threshold
+            or transition.terminal_kind == "clear"
+        ]
+        terminal_pool = [
+            transition
+            for transition in self._items
+            if transition.done or transition.terminal_kind != "none"
+        ]
+        draw(success_pool, success_count)
+        draw(terminal_pool, terminal_count)
+        draw(self._items, batch_size - len(selected))
+        random.shuffle(selected)
+        return selected
 
     def __len__(self) -> int:
         return len(self._items)
@@ -1601,8 +1683,9 @@ def run_dqn_attempt(
     attempt_index: int,
     config: DQNConfig | None = None,
     global_step_start: int = 0,
+    global_update_start: int = 0,
 ) -> DQNAttemptSummary:
-    """Run one live episode and apply online replay-based DQN updates."""
+    """Run one live episode and apply DQN updates after the attempt ends."""
 
     effective_config = config or DQNConfig()
     observation = env.reset(attempt_index=attempt_index)
@@ -1635,9 +1718,10 @@ def run_dqn_attempt(
     last_step: LiveStepResult | None = None
 
     while True:
-        epsilon = _linear_epsilon(
+        epsilon = _dqn_epsilon(
             effective_config,
             global_step_start + len(pending_transitions),
+            attempt_index=attempt_index,
         )
         if epsilon_first is None:
             epsilon_first = epsilon
@@ -1713,6 +1797,8 @@ def run_dqn_attempt(
                 terminated=last_step.terminated,
                 truncated=last_step.truncated,
                 aborted=last_step.aborted,
+                contains_clear_bonus=_dqn_step_contains_clear_bonus(last_step),
+                terminal_kind=_dqn_terminal_kind_from_step(last_step),
             )
         )
 
@@ -1727,6 +1813,7 @@ def run_dqn_attempt(
     )
     if replay_skip_reason is None:
         committed_step = global_step_start
+        committed_update = global_update_start
         replay_transitions = _expand_dqn_n_step_transitions(
             pending_transitions,
             config=effective_config,
@@ -1744,8 +1831,9 @@ def run_dqn_attempt(
             if loss is not None:
                 losses.append(loss)
                 update_count += 1
-            if committed_step % effective_config.target_update_interval == 0:
-                policy.sync_target()
+                committed_update += 1
+                if committed_update % effective_config.target_update_interval == 0:
+                    policy.sync_target()
 
     return DQNAttemptSummary(
         attempt_index=attempt_index,
@@ -1939,6 +2027,7 @@ def run_dqn_training(
     optimizer = policy.make_optimizer(effective_config)
     replay_buffer = DQNReplayBuffer(effective_config.replay_capacity)
     global_step = 0
+    global_update_count = 0
     attempts: list[DQNAttemptSummary] = []
     evaluation_runs: list[DQNEvaluationRunSummary] = []
     next_evaluation_attempt_index = effective_config.attempts + 1
@@ -1951,9 +2040,21 @@ def run_dqn_training(
             attempt_index=attempt_index,
             config=effective_config,
             global_step_start=global_step,
+            global_update_start=global_update_count,
         )
         attempts.append(attempt)
         global_step += attempt.replay_appended_count
+        global_update_count += attempt.update_count
+        if summary_path is not None:
+            _write_json(
+                _make_dqn_training_summary(
+                    attempts=attempts,
+                    config=effective_config,
+                    policy=policy,
+                    evaluation_runs=evaluation_runs,
+                ).to_dict(),
+                Path(summary_path),
+            )
         if _should_run_dqn_evaluation(effective_config, attempt_index):
             evaluation = run_dqn_evaluation(
                 env,
@@ -1964,13 +2065,41 @@ def run_dqn_training(
             )
             evaluation_runs.append(evaluation)
             next_evaluation_attempt_index += effective_config.eval_attempts
+            if summary_path is not None:
+                _write_json(
+                    _make_dqn_training_summary(
+                        attempts=attempts,
+                        config=effective_config,
+                        policy=policy,
+                        evaluation_runs=evaluation_runs,
+                    ).to_dict(),
+                    Path(summary_path),
+                )
             if evaluation_callback is not None:
                 evaluation_callback(evaluation)
 
-    summary = DQNTrainingSummary(
+    summary = _make_dqn_training_summary(
         attempts=attempts,
+        config=effective_config,
+        policy=policy,
+        evaluation_runs=evaluation_runs,
+    )
+    if summary_path is not None:
+        _write_json(summary.to_dict(), Path(summary_path))
+    return summary
+
+
+def _make_dqn_training_summary(
+    *,
+    attempts: Sequence[DQNAttemptSummary],
+    config: DQNConfig,
+    policy: TinyLiveDQNNetwork,
+    evaluation_runs: Sequence[DQNEvaluationRunSummary],
+) -> DQNTrainingSummary:
+    return DQNTrainingSummary(
+        attempts=list(attempts),
         config={
-            **asdict(effective_config),
+            **asdict(config),
             "algorithm": "tiny_dqn",
             "policy": {
                 "input_dim": policy.input_dim,
@@ -1986,11 +2115,8 @@ def run_dqn_training(
                 ),
             },
         },
-        evaluation_runs=evaluation_runs,
+        evaluation_runs=list(evaluation_runs),
     )
-    if summary_path is not None:
-        _write_json(summary.to_dict(), Path(summary_path))
-    return summary
 
 
 def _attempt_result_from_last_step(
@@ -2003,6 +2129,26 @@ def _attempt_result_from_last_step(
     ):
         return dict(last_step.info["attempt_result"])
     return env.save_attempt().to_dict()
+
+
+def _dqn_step_contains_clear_bonus(step: LiveStepResult) -> bool:
+    reward_terms = step.info.get("reward_terms")
+    if not isinstance(reward_terms, dict):
+        return False
+    return float(reward_terms.get("clear_bonus") or 0.0) > 0.0
+
+
+def _dqn_terminal_kind_from_step(step: LiveStepResult) -> str:
+    if step.terminated:
+        reason = step.info.get("termination_reason")
+        if reason in {"clear", "death"}:
+            return str(reason)
+        return "terminal"
+    if step.truncated:
+        return "truncated"
+    if step.aborted:
+        return "aborted"
+    return "none"
 
 
 def _dqn_replay_skip_reason(
@@ -2351,6 +2497,10 @@ def _expand_dqn_n_step_transitions(
 
         end_transition = transitions[end_index]
         bootstrap_steps = end_index - start_index + 1
+        contains_clear_bonus = any(
+            transition.contains_clear_bonus
+            for transition in transitions[start_index : end_index + 1]
+        )
         expanded.append(
             DQNTransition(
                 features=start_transition.features,
@@ -2362,6 +2512,8 @@ def _expand_dqn_n_step_transitions(
                 truncated=end_transition.truncated,
                 aborted=end_transition.aborted,
                 discount=config.gamma**bootstrap_steps,
+                contains_clear_bonus=contains_clear_bonus,
+                terminal_kind=end_transition.terminal_kind,
             )
         )
     return expanded
@@ -2380,9 +2532,20 @@ def _attempt_result_float_values(
     return values
 
 
-def _linear_epsilon(config: DQNConfig, global_step: int) -> float:
+def _dqn_epsilon(
+    config: DQNConfig,
+    global_step: int,
+    *,
+    attempt_index: int,
+) -> float:
     if config.deterministic_actions:
         return 0.0
+    if config.epsilon_schedule == "picklegawd":
+        decay_exponent = max(0, attempt_index - 1)
+        return max(
+            config.epsilon_end,
+            config.epsilon_start * (config.epsilon_decay_rate**decay_exponent),
+        )
     progress = _clamp(global_step / config.epsilon_decay_steps)
     return config.epsilon_start + progress * (
         config.epsilon_end - config.epsilon_start
@@ -2400,7 +2563,12 @@ def _optimize_dqn(
     if len(replay_buffer) < ready_count:
         return None
 
-    batch = replay_buffer.sample(config.batch_size)
+    batch = replay_buffer.sample(
+        config.batch_size,
+        success_fraction=config.success_replay_fraction,
+        terminal_fraction=config.terminal_replay_fraction,
+        success_reward_threshold=config.success_reward_threshold,
+    )
     torch = policy.torch
     feature_tensor = torch.tensor(
         [transition.features for transition in batch],

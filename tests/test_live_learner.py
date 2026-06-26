@@ -520,6 +520,99 @@ def test_dqn_decision_stride_repeats_noop_steps_for_one_transition(
     assert attempt.attempt_result["cleared"] is False
 
 
+def test_dqn_replay_buffer_overwrites_oldest_transition() -> None:
+    features = [0.0] * dqn_feature_dim(history_length=0)
+    replay = DQNReplayBuffer(capacity=2)
+
+    for reward in (1.0, 2.0, 3.0):
+        replay.append(
+            DQNTransition(
+                features=features,
+                action_index=1,
+                reward=reward,
+                next_features=features,
+                done=False,
+                terminated=False,
+            )
+        )
+
+    assert len(replay) == 2
+    assert {transition.reward for transition in replay.sample(2)} == {2.0, 3.0}
+
+
+def test_dqn_replay_buffer_can_reserve_success_and_terminal_samples() -> None:
+    features = [0.0] * dqn_feature_dim(history_length=0)
+    replay = DQNReplayBuffer(capacity=5)
+
+    replay.append(
+        DQNTransition(
+            features=features,
+            action_index=0,
+            reward=0.0,
+            next_features=features,
+            done=False,
+            terminated=False,
+        )
+    )
+    replay.append(
+        DQNTransition(
+            features=features,
+            action_index=1,
+            reward=90.0,
+            next_features=features,
+            done=True,
+            terminated=True,
+            contains_clear_bonus=True,
+            terminal_kind="clear",
+        )
+    )
+    replay.append(
+        DQNTransition(
+            features=features,
+            action_index=1,
+            reward=60.0,
+            next_features=features,
+            done=False,
+            terminated=False,
+        )
+    )
+    replay.append(
+        DQNTransition(
+            features=features,
+            action_index=0,
+            reward=-10.0,
+            next_features=features,
+            done=True,
+            terminated=True,
+            terminal_kind="death",
+        )
+    )
+    replay.append(
+        DQNTransition(
+            features=features,
+            action_index=0,
+            reward=1.0,
+            next_features=features,
+            done=False,
+            terminated=False,
+        )
+    )
+
+    batch = replay.sample(
+        4,
+        success_fraction=0.5,
+        terminal_fraction=0.25,
+        success_reward_threshold=50.0,
+    )
+
+    assert len(batch) == 4
+    assert sum(
+        transition.contains_clear_bonus or transition.reward >= 50.0
+        for transition in batch
+    ) >= 2
+    assert any(transition.terminal_kind == "death" for transition in batch)
+
+
 def test_dqn_training_runs_periodic_greedy_evaluation(
     tmp_path: Path,
 ) -> None:
@@ -542,6 +635,14 @@ def test_dqn_training_runs_periodic_greedy_evaluation(
     )
     _bias_dqn_toward_hold(torch, policy)
     callback_runs = []
+    summary_path = tmp_path / "dqn_eval_summary.json"
+    callback_snapshots = []
+
+    def capture_evaluation(evaluation):  # type: ignore[no-untyped-def]
+        callback_runs.append(evaluation)
+        callback_snapshots.append(
+            json.loads(summary_path.read_text(encoding="utf-8"))
+        )
 
     with env:
         summary = run_dqn_training(
@@ -558,18 +659,21 @@ def test_dqn_training_runs_periodic_greedy_evaluation(
                 eval_attempts=2,
                 eval_interval_attempts=1,
             ),
-            summary_path=tmp_path / "dqn_eval_summary.json",
-            evaluation_callback=callback_runs.append,
+            summary_path=summary_path,
+            evaluation_callback=capture_evaluation,
         )
 
-    written_summary = json.loads(
-        (tmp_path / "dqn_eval_summary.json").read_text(encoding="utf-8")
-    )
+    written_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     first_eval = summary.evaluation_runs[0]
     second_eval = summary.evaluation_runs[1]
 
     assert len(summary.evaluation_runs) == 2
     assert len(callback_runs) == 2
+    assert [snapshot["attempt_count"] for snapshot in callback_snapshots] == [1, 2]
+    assert [len(snapshot["evaluation_runs"]) for snapshot in callback_snapshots] == [
+        1,
+        2,
+    ]
     assert first_eval.after_attempt_index == 1
     assert first_eval.clear_count == 2
     assert first_eval.clear_rate == pytest.approx(1.0)
@@ -632,6 +736,159 @@ def test_dqn_repeat_action_penalty_reduces_training_reward(
     assert attempt.action_diagnostics["collapse_flags"]["selected_action_collapse"]
     assert attempt.greedy_action_counts["hold"] == 4
     assert attempt.q_margin_stats["mean"] > 0.0
+
+
+def test_dqn_target_sync_waits_for_successful_update(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    fake_client = OneStepPressRewardClient()
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="target_sync_warmup",
+            output_dir=tmp_path / "attempts",
+            max_steps=1,
+            action_horizon_ticks=0,
+            success_percent=100.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+    policy = TinyLiveDQNNetwork.from_encoder_config(
+        NeuralPolicyConfig(hidden_size=4, seed=41),
+        history_length=0,
+    )
+    _set_dqn_online_target_biases(
+        torch,
+        policy,
+        online_biases=[0.0, 1.0],
+        target_biases=[0.0, 0.0],
+    )
+    features = [0.0] * dqn_feature_dim(history_length=0)
+    before_target_hold_q = _dqn_target_action_q(
+        torch,
+        policy,
+        features,
+        action_index=1,
+    )
+
+    with env:
+        summary = run_dqn_training(
+            env,
+            policy,
+            config=DQNConfig(
+                attempts=1,
+                deterministic_actions=True,
+                history_length=0,
+                batch_size=1,
+                replay_capacity=4,
+                warmup_steps=2,
+                target_update_interval=1,
+            ),
+        )
+
+    after_target_hold_q = _dqn_target_action_q(
+        torch,
+        policy,
+        features,
+        action_index=1,
+    )
+
+    assert summary.attempts[0].replay_appended_count == 1
+    assert summary.attempts[0].update_count == 0
+    assert after_target_hold_q == pytest.approx(before_target_hold_q)
+
+
+def test_dqn_target_sync_uses_global_update_count(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    fake_client = OneStepPressRewardClient()
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="target_sync_global_updates",
+            output_dir=tmp_path / "attempts",
+            max_steps=1,
+            action_horizon_ticks=0,
+            success_percent=100.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+    policy = TinyLiveDQNNetwork.from_encoder_config(
+        NeuralPolicyConfig(hidden_size=4, seed=43),
+        history_length=0,
+    )
+    _set_dqn_online_target_biases(
+        torch,
+        policy,
+        online_biases=[0.0, 1.0],
+        target_biases=[0.0, 0.0],
+    )
+
+    with env:
+        summary = run_dqn_training(
+            env,
+            policy,
+            config=DQNConfig(
+                attempts=2,
+                deterministic_actions=True,
+                history_length=0,
+                batch_size=1,
+                replay_capacity=4,
+                warmup_steps=1,
+                target_update_interval=2,
+            ),
+        )
+
+    assert [attempt.update_count for attempt in summary.attempts] == [1, 1]
+    assert _dqn_networks_match(torch, policy)
+
+
+def test_dqn_picklegawd_epsilon_schedule_decays_by_attempt() -> None:
+    config = DQNConfig(
+        epsilon_schedule="picklegawd",
+        epsilon_start=1.0,
+        epsilon_end=0.01,
+        epsilon_decay_rate=0.995,
+    )
+
+    assert live_learner_module._dqn_epsilon(
+        config,
+        0,
+        attempt_index=1,
+    ) == pytest.approx(1.0)
+    assert live_learner_module._dqn_epsilon(
+        config,
+        9999,
+        attempt_index=2,
+    ) == pytest.approx(0.995)
+    assert live_learner_module._dqn_epsilon(
+        config,
+        0,
+        attempt_index=5000,
+    ) == pytest.approx(0.01)
+
+
+def test_dqn_linear_epsilon_schedule_uses_global_step() -> None:
+    config = DQNConfig(
+        epsilon_schedule="linear",
+        epsilon_start=0.2,
+        epsilon_end=0.05,
+        epsilon_decay_steps=100,
+    )
+
+    assert live_learner_module._dqn_epsilon(
+        config,
+        0,
+        attempt_index=99,
+    ) == pytest.approx(0.2)
+    assert live_learner_module._dqn_epsilon(
+        config,
+        50,
+        attempt_index=99,
+    ) == pytest.approx(0.125)
+    assert live_learner_module._dqn_epsilon(
+        config,
+        1000,
+        attempt_index=99,
+    ) == pytest.approx(0.05)
 
 
 def test_dqn_target_bootstraps_truncated_but_not_terminated_transition() -> None:
@@ -1109,6 +1366,26 @@ def _dqn_with_split_online_target_values(torch) -> TinyLiveDQNNetwork:  # type: 
     return policy
 
 
+def _set_dqn_online_target_biases(
+    torch,  # type: ignore[no-untyped-def]
+    policy: TinyLiveDQNNetwork,
+    *,
+    online_biases: list[float],
+    target_biases: list[float],
+) -> None:
+    with torch.no_grad():
+        for parameter in policy.q_network.parameters():
+            parameter.zero_()
+        for parameter in policy.target_network.parameters():
+            parameter.zero_()
+        policy.q_network[2].bias.copy_(
+            torch.tensor(online_biases, dtype=torch.float32)
+        )
+        policy.target_network[2].bias.copy_(
+            torch.tensor(target_biases, dtype=torch.float32)
+        )
+
+
 def _dqn_action_q(
     torch,  # type: ignore[no-untyped-def]
     policy: TinyLiveDQNNetwork,
@@ -1124,6 +1401,33 @@ def _dqn_action_q(
     with torch.no_grad():
         values = policy.q_network(feature_tensor)
     return float(values[0, action_index].detach().cpu().item())
+
+
+def _dqn_target_action_q(
+    torch,  # type: ignore[no-untyped-def]
+    policy: TinyLiveDQNNetwork,
+    features: list[float],
+    *,
+    action_index: int,
+) -> float:
+    feature_tensor = torch.tensor(
+        features,
+        dtype=torch.float32,
+        device=policy.device,
+    ).unsqueeze(0)
+    with torch.no_grad():
+        values = policy.target_network(feature_tensor)
+    return float(values[0, action_index].detach().cpu().item())
+
+
+def _dqn_networks_match(torch, policy: TinyLiveDQNNetwork) -> bool:  # type: ignore[no-untyped-def]
+    return all(
+        bool(torch.equal(online, target))
+        for online, target in zip(
+            policy.q_network.parameters(),
+            policy.target_network.parameters(),
+        )
+    )
 
 
 def _profile() -> HumanProfile:

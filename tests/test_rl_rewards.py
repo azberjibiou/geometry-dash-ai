@@ -1,4 +1,11 @@
-from gd_rl import RewardConfig, compute_reward, summarize_trace_outcome
+import pytest
+
+from gd_rl import (
+    RewardConfig,
+    compute_picklegawd_step_reward_terms,
+    compute_reward,
+    summarize_trace_outcome,
+)
 from gd_trace.trace_schema import TraceRow
 from tests.test_trace_io import make_row
 
@@ -6,6 +13,19 @@ from tests.test_trace_io import make_row
 def row(tick: int, *, percent: float = 0.0, dead: bool = False) -> TraceRow:
     data = make_row(tick, percent=percent).to_dict()
     data["dead"] = dead
+    return TraceRow.from_mapping(data)
+
+
+def input_row(
+    tick: int,
+    *,
+    percent: float = 0.0,
+    dead: bool = False,
+    input_down: bool = False,
+) -> TraceRow:
+    data = make_row(tick, percent=percent).to_dict()
+    data["dead"] = dead
+    data["input_down"] = input_down
     return TraceRow.from_mapping(data)
 
 
@@ -83,3 +103,63 @@ def test_reward_can_penalize_excessive_input() -> None:
     )
 
     assert reward.terms["illegal_or_excessive_input_penalty"] == -0.75
+
+
+def test_picklegawd_reward_gives_survival_tick_reward_for_idle_and_hold() -> None:
+    rows = [
+        input_row(0, percent=0.0, input_down=False),
+        input_row(1, percent=1.0, input_down=False),
+        input_row(2, percent=3.1, input_down=True),
+        input_row(3, percent=4.0, input_down=True, dead=True),
+    ]
+    config = RewardConfig(reward_style="picklegawd")
+
+    reward = compute_reward(rows, config=config)
+
+    assert reward.terms["progress_delta"] == 4.0
+    assert reward.terms["best_progress_bonus"] == 2.0
+    assert reward.terms["default_reward"] == 0.02
+    assert reward.terms["jump_punishment"] == 0.0
+    assert reward.terms["checkpoint_reward"] == 0.0
+    assert reward.terms["death_penalty"] == -10.0
+    assert reward.total == pytest.approx(-3.98)
+
+
+def test_picklegawd_reward_does_not_penalize_hold_ticks_by_default() -> None:
+    rows = [
+        input_row(0, percent=0.0, input_down=False),
+        *[
+            input_row(tick, percent=tick * 26.658 / 205.0, input_down=True)
+            for tick in range(1, 205)
+        ],
+        input_row(205, percent=26.658, input_down=True, dead=True),
+    ]
+    config = RewardConfig(reward_style="picklegawd")
+
+    reward = compute_reward(rows, config=config)
+
+    assert reward.total == pytest.approx(32.027)
+    assert reward.terms["death_penalty"] == -10.0
+    assert reward.terms["jump_punishment"] == 0.0
+    assert reward.terms["default_reward"] > 0.0
+
+
+def test_picklegawd_step_reward_adds_clear_bonus_after_action_reward() -> None:
+    config = RewardConfig(reward_style="picklegawd", success_percent=99.0)
+
+    reward = compute_picklegawd_step_reward_terms(
+        current_percent=98.8,
+        next_percent=99.5,
+        previous_best_percent=98.8,
+        input_down=True,
+        dead=False,
+        cleared=True,
+        config=config,
+    )
+
+    assert reward["progress_delta"] == pytest.approx(0.7)
+    assert reward["best_progress_bonus"] == pytest.approx(0.35)
+    assert reward["default_reward"] == 0.01
+    assert reward["jump_punishment"] == 0.0
+    assert reward["clear_bonus"] == 100.0
+    assert sum(reward.values()) == pytest.approx(101.06)

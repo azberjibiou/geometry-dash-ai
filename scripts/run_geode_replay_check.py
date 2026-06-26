@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
@@ -13,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from gd_env import BridgeObservation, GeometryDashClient
+from gd_env import BridgeDiagnostic, BridgeObservation, GeometryDashClient
 from gd_trace import TraceRow, load_macro_json, summarize_replay_check
 from gd_trace.compare_trace import first_death_tick
 
@@ -39,6 +40,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="stop each trace as soon as observation.percent reaches --success-percent",
     )
     parser.add_argument(
+        "--post-success-delay-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "sleep after a successful trial before the next reset, useful when "
+            "Geometry Dash shows delayed clear UI"
+        ),
+    )
+    parser.add_argument(
         "--require-start-percent-max",
         type=float,
         help="fail if a trial's fresh tick-0 observation starts above this percent",
@@ -47,6 +57,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--require-start-x-max",
         type=float,
         help="fail if a trial's fresh tick-0 observation starts beyond this x position",
+    )
+    parser.add_argument(
+        "--start-guard-reset-retries",
+        type=int,
+        default=0,
+        help="retry reset when fresh-start percent/x guards fail",
     )
     parser.add_argument(
         "--require-progress-tick",
@@ -70,6 +86,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--trials must be positive")
     if args.max_observations <= 0:
         parser.error("--max-observations must be positive")
+    if args.post_success_delay_seconds < 0.0:
+        parser.error("--post-success-delay-seconds must be non-negative")
     if (
         args.require_start_percent_max is not None
         and not 0.0 <= args.require_start_percent_max <= 100.0
@@ -77,6 +95,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--require-start-percent-max must be between 0 and 100")
     if args.require_start_x_max is not None and args.require_start_x_max < 0.0:
         parser.error("--require-start-x-max must be non-negative")
+    if args.start_guard_reset_retries < 0:
+        parser.error("--start-guard-reset-retries must be non-negative")
     if args.require_progress_tick is not None and args.require_progress_tick < 0:
         parser.error("--require-progress-tick must be non-negative")
     if (
@@ -110,21 +130,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.live_send:
             # Clear any queued macro left in the mod from a prior replay check.
             client.load_macro([], metadata={"replay_mode": "live_send_clear"})
-        else:
-            client.load_macro(macro.events, metadata=macro.metadata)
 
         for trial_index in range(args.trials):
             trial_number = trial_index + 1
             diagnostics = []
-            initial_observation = client.reset_attempt(
-                f"replay_check_trial_{trial_number}",
-                max_observations=args.reset_wait_observations,
-                diagnostics=diagnostics,
-            )
+            if not args.live_send:
+                client.load_macro(
+                    macro.events,
+                    metadata={
+                        **macro.metadata,
+                        "replay_check_trial": trial_number,
+                    },
+                )
             try:
-                _validate_start_observation(
-                    initial_observation,
+                initial_observation, reset_attempts = _reset_until_valid_start(
+                    client,
                     trial_number=trial_number,
+                    max_observations=args.reset_wait_observations,
+                    max_retries=args.start_guard_reset_retries,
+                    diagnostics=diagnostics,
                     require_percent_max=args.require_start_percent_max,
                     require_x_max=args.require_start_x_max,
                 )
@@ -177,12 +201,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "first_tick": rows[0].tick if rows else None,
                     "start_percent": rows[0].percent if rows else None,
                     "start_x": rows[0].x if rows else None,
+                    "reset_attempts": reset_attempts,
                     "last_tick": rows[-1].tick if rows else None,
                     "final_percent": rows[-1].percent if rows else 0.0,
                     "death_tick": first_death_tick(rows),
                     "diagnostics": diagnostics_document,
                 }
             )
+            if (
+                rows
+                and rows[-1].percent >= args.success_percent
+                and args.post_success_delay_seconds > 0.0
+            ):
+                time.sleep(args.post_success_delay_seconds)
 
     summary = summarize_replay_check(
         traces,
@@ -205,11 +236,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "max_observations": args.max_observations,
             "success_percent": args.success_percent,
             "stop_on_success": args.stop_on_success,
+            "post_success_delay_seconds": args.post_success_delay_seconds,
             "require_start_percent_max": args.require_start_percent_max,
             "require_start_x_max": args.require_start_x_max,
+            "start_guard_reset_retries": args.start_guard_reset_retries,
             "require_progress_tick": args.require_progress_tick,
             "require_progress_percent_min": args.require_progress_percent_min,
             "live_send": args.live_send,
+            "reload_macro_each_trial": not args.live_send,
         },
         "trials": trial_results,
         "summary": summary.to_dict(),
@@ -231,6 +265,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     return 0
+
+
+def _reset_until_valid_start(
+    client: GeometryDashClient,
+    *,
+    trial_number: int,
+    max_observations: int,
+    max_retries: int,
+    diagnostics: list,
+    require_percent_max: float | None,
+    require_x_max: float | None,
+) -> tuple[BridgeObservation, int]:
+    last_error: ValueError | None = None
+    for reset_index in range(max_retries + 1):
+        observation = client.reset_attempt(
+            f"replay_check_trial_{trial_number}_reset_{reset_index + 1}",
+            max_observations=max_observations,
+            diagnostics=diagnostics,
+        )
+        try:
+            _validate_start_observation(
+                observation,
+                trial_number=trial_number,
+                require_percent_max=require_percent_max,
+                require_x_max=require_x_max,
+            )
+            return observation, reset_index + 1
+        except ValueError as exc:
+            last_error = exc
+            diagnostics.append(
+                BridgeDiagnostic(
+                    kind="fresh_start_guard_retry",
+                    tick=observation.tick,
+                    data={
+                        "trial": trial_number,
+                        "reset_attempt": reset_index + 1,
+                        "percent": observation.percent,
+                        "x": observation.x,
+                        "error": str(exc),
+                    },
+                )
+            )
+    if last_error is None:
+        raise RuntimeError("unreachable start guard state")
+    raise last_error
 
 
 def _validate_start_observation(

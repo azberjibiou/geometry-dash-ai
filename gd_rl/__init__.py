@@ -64,6 +64,7 @@ from gd_rl.rewards import (
     RewardBreakdown,
     RewardConfig,
     TraceOutcome,
+    compute_picklegawd_step_reward_terms,
     compute_reward,
     summarize_trace_outcome,
 )
@@ -138,6 +139,7 @@ __all__ = [
     "TinyLivePolicyNetwork",
     "actions_to_events",
     "actor_critic_feature_dim",
+    "compute_picklegawd_step_reward_terms",
     "compute_reward",
     "dqn_feature_dim",
     "encode_actor_critic_observation",

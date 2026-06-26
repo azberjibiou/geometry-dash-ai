@@ -24,6 +24,7 @@ class ImageDatasetConfig:
     required_frame_stack_size: int | None = None
     pad_short_stacks: bool = True
     progress_scale: float = 100.0
+    label_mode: str = "events"
 
     def __post_init__(self) -> None:
         if self.image_width <= 0:
@@ -37,6 +38,10 @@ class ImageDatasetConfig:
             raise ImageDatasetError("required_frame_stack_size must be positive")
         if self.progress_scale <= 0.0:
             raise ImageDatasetError("progress_scale must be positive")
+        if self.label_mode not in ("events", "target_input_down"):
+            raise ImageDatasetError(
+                "label_mode must be 'events' or 'target_input_down'"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +71,7 @@ class ImageInputSample:
     sample: ImitationSample
     frame_stack: tuple[GrayscaleFrame, ...]
     scalar_features: tuple[float, ...]
-    labels: tuple[float, float]
+    labels: tuple[float, ...]
 
     @property
     def frame_shape(self) -> tuple[int, int, int]:
@@ -154,10 +159,7 @@ def load_image_input_sample(
             sample.progress / effective_config.progress_scale,
             1.0 if sample.input_down else 0.0,
         ),
-        labels=(
-            1.0 if sample.press_event else 0.0,
-            1.0 if sample.release_event else 0.0,
-        ),
+        labels=_labels_for_sample(sample, label_mode=effective_config.label_mode),
     )
 
 
@@ -371,6 +373,21 @@ def _frame_base_from_summary(dataset_dir: Path) -> Path:
     if not isinstance(manifest_path, str):
         raise ImageDatasetError("summary inputs must contain manifest_jsonl")
     return Path(manifest_path).parent
+
+
+def _labels_for_sample(
+    sample: ImitationSample,
+    *,
+    label_mode: str,
+) -> tuple[float, ...]:
+    if label_mode == "events":
+        return (
+            1.0 if sample.press_event else 0.0,
+            1.0 if sample.release_event else 0.0,
+        )
+    if label_mode == "target_input_down":
+        return (1.0 if sample.target_input_down else 0.0,)
+    raise ImageDatasetError("unsupported label_mode")
 
 
 def _grayscale(red: int, green: int, blue: int) -> float:

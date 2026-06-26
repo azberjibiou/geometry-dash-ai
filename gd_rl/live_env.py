@@ -13,8 +13,19 @@ from gd_env import BridgeDiagnostic, BridgeObservation, GeometryDashClient
 from gd_human_model import Event, HumanProfile, HumanizedAgent
 from gd_rl.actions import IntendedAction
 from gd_rl.results import AttemptResult
-from gd_rl.rewards import RewardConfig, compute_reward, summarize_trace_outcome
-from gd_trace import Macro, TraceRow, save_macro_json, save_trace_jsonl
+from gd_rl.rewards import (
+    RewardConfig,
+    compute_picklegawd_step_reward_terms,
+    compute_reward,
+    summarize_trace_outcome,
+)
+from gd_trace import (
+    Macro,
+    TraceRow,
+    save_macro_json,
+    save_trace_jsonl,
+    trace_input_macro,
+)
 
 
 class LiveGeodeClientLike(Protocol):
@@ -133,8 +144,8 @@ class LivePracticeEnvConfig:
     def __post_init__(self) -> None:
         if not self.level_id:
             raise ValueError("level_id must be non-empty")
-        if self.max_steps <= 0:
-            raise ValueError("max_steps must be positive")
+        if self.max_steps < 0:
+            raise ValueError("max_steps must be non-negative")
         if self.reset_wait_observations <= 0:
             raise ValueError("reset_wait_observations must be positive")
         if self.fps <= 0:
@@ -268,6 +279,7 @@ class LivePracticeEnv:
         self._total_step_reward = 0.0
         self._charged_excessive_events = 0
 
+        self._clear_queued_macro_if_supported(client)
         initial_observation, reset_attempts = self._reset_until_fresh_start(client)
         self._diagnostics.append(
             BridgeDiagnostic(
@@ -364,6 +376,7 @@ class LivePracticeEnv:
         truncated = (
             not terminated
             and not tick_rewound
+            and self.config.max_steps > 0
             and self._step_count >= self.config.max_steps
         )
         aborted = tick_rewound
@@ -396,7 +409,10 @@ class LivePracticeEnv:
             "reward_terms": reward_terms,
             "raw_observation": next_observation.to_dict(),
             "pending_executed_event_count": human.pending_count,
-            "max_steps_reached": self._step_count >= self.config.max_steps,
+            "max_steps_reached": (
+                self.config.max_steps > 0
+                and self._step_count >= self.config.max_steps
+            ),
             "terminated": terminated,
             "truncated": truncated,
             "aborted": aborted,
@@ -419,6 +435,16 @@ class LivePracticeEnv:
                 success_percent=self.config.success_percent,
             )
             if terminal_cleared and self.config.post_terminal_delay_seconds > 0.0:
+                self._diagnostics.append(
+                    BridgeDiagnostic(
+                        kind="live_post_terminal_delay",
+                        tick=next_observation.tick,
+                        data={
+                            "delay_seconds": self.config.post_terminal_delay_seconds,
+                            "termination_reason": termination_reason,
+                        },
+                    )
+                )
                 time.sleep(self.config.post_terminal_delay_seconds)
             result = self.save_attempt()
             info["attempt_result"] = result.to_dict()
@@ -446,6 +472,7 @@ class LivePracticeEnv:
         attempt_dir = self._attempt_dir
         intended_path = attempt_dir / "policy_intended_events.json"
         executed_path = attempt_dir / "human_executed_events.json"
+        trace_input_path = attempt_dir / "trace_input_events.json"
         humanization_path = attempt_dir / "humanization_details.json"
         trace_path = attempt_dir / "trace.jsonl"
         diagnostics_path = attempt_dir / "geode_diagnostics.json"
@@ -471,6 +498,15 @@ class LivePracticeEnv:
         save_macro_json(intended_macro, intended_path)
         save_macro_json(executed_macro, executed_path)
         save_trace_jsonl(self._rows, trace_path)
+        observed_input_macro = trace_input_macro(
+            self._rows,
+            metadata={
+                "level_id": self.config.level_id,
+                "attempt_index": self._attempt_index,
+                "source": "live_step_env",
+            },
+        )
+        save_macro_json(observed_input_macro, trace_input_path)
 
         pending_events = self._ensure_human().flush_pending_events()
         dropped_event_count = sum(
@@ -541,6 +577,8 @@ class LivePracticeEnv:
             intended_event_count=len(self._intended_events),
             executed_event_count=len(self._executed_events),
             dropped_event_count=dropped_event_count,
+            trace_input_events_path=str(trace_input_path),
+            trace_input_event_count=len(observed_input_macro.events),
             metadata={
                 "executor": "geode_live_step",
                 "outcome": {
@@ -584,8 +622,17 @@ class LivePracticeEnv:
                 last_error = exc
                 if reset_index + 1 >= max_resets:
                     raise
-                if self.config.start_guard_retry_delay_seconds > 0.0:
-                    time.sleep(self.config.start_guard_retry_delay_seconds)
+                retry_delay_seconds = self.config.start_guard_retry_delay_seconds
+                if (
+                    isinstance(exc, ValueError)
+                    and "already completed" in str(exc)
+                ):
+                    retry_delay_seconds = max(
+                        retry_delay_seconds,
+                        self.config.post_terminal_delay_seconds,
+                    )
+                if retry_delay_seconds > 0.0:
+                    time.sleep(retry_delay_seconds)
 
         raise RuntimeError("unreachable reset retry state") from last_error
 
@@ -639,6 +686,35 @@ class LivePracticeEnv:
         next_observation: BridgeObservation,
     ) -> dict[str, float]:
         reward_config = self.config.reward_config
+        event_count_for_penalty = max(
+            len(self._intended_events),
+            len(self._executed_events),
+        )
+        excessive_events = max(
+            0,
+            event_count_for_penalty - reward_config.excessive_input_free_events,
+        )
+        newly_charged_excessive_events = max(
+            0,
+            excessive_events - self._charged_excessive_events,
+        )
+        self._charged_excessive_events += newly_charged_excessive_events
+
+        if reward_config.reward_style == "picklegawd":
+            return compute_picklegawd_step_reward_terms(
+                current_percent=current.percent,
+                next_percent=next_observation.percent,
+                previous_best_percent=self._best_percent,
+                input_down=next_observation.input_down,
+                dead=next_observation.dead,
+                cleared=_is_clear_observation(
+                    next_observation,
+                    success_percent=self.config.success_percent,
+                ),
+                config=reward_config,
+                newly_charged_excessive_events=newly_charged_excessive_events,
+            )
+
         progress_delta = max(0.0, next_observation.percent - current.percent)
         best_progress_delta = max(0.0, next_observation.percent - self._best_percent)
         previous_sections = floor(self._best_percent / reward_config.section_size_percent)
@@ -660,20 +736,6 @@ class LivePracticeEnv:
                 - next_observation.percent
                 / max(reward_config.success_percent, 1e-9),
             )
-
-        event_count_for_penalty = max(
-            len(self._intended_events),
-            len(self._executed_events),
-        )
-        excessive_events = max(
-            0,
-            event_count_for_penalty - reward_config.excessive_input_free_events,
-        )
-        newly_charged_excessive_events = max(
-            0,
-            excessive_events - self._charged_excessive_events,
-        )
-        self._charged_excessive_events += newly_charged_excessive_events
 
         return {
             "progress_delta": progress_delta * reward_config.progress_scale,
@@ -706,6 +768,25 @@ class LivePracticeEnv:
     def _default_client_factory(self) -> LiveGeodeClientLike:
         return GeometryDashClient()
 
+    def _clear_queued_macro_if_supported(self, client: LiveGeodeClientLike) -> None:
+        load_macro = getattr(client, "load_macro", None)
+        if not callable(load_macro):
+            return
+        load_macro(
+            [],
+            metadata={
+                "source": "live_step_env",
+                "purpose": "clear_stale_queued_macro",
+            },
+        )
+        self._diagnostics.append(
+            BridgeDiagnostic(
+                kind="live_queued_macro_cleared",
+                tick=None,
+                data={"source": "live_step_env"},
+            )
+        )
+
 
 def _is_clear_observation(
     observation: BridgeObservation,
@@ -734,6 +815,10 @@ def _validate_start_observation(
     require_x_max: float | None,
 ) -> None:
     failures = []
+    if observation.dead:
+        failures.append("observation is already dead")
+    if observation.completed:
+        failures.append("observation is already completed")
     if (
         require_percent_max is not None
         and observation.percent > require_percent_max

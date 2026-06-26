@@ -22,6 +22,7 @@ def args(**overrides: object) -> argparse.Namespace:
         "random_seed": 7,
         "success_percent": 100.0,
         "stop_after_first_clear": False,
+        "reward_style": "progress",
         "progress_scale": 1.0,
         "best_progress_bonus_scale": 0.5,
         "section_size_percent": 10.0,
@@ -30,6 +31,10 @@ def args(**overrides: object) -> argparse.Namespace:
         "death_penalty": 10.0,
         "excessive_input_free_events": 0,
         "excessive_input_penalty": 0.0,
+        "default_reward": 0.01,
+        "jump_punishment": 0.0,
+        "checkpoint_reward": 0.0,
+        "checkpoint_size_percent": 3.0,
         "host": "127.0.0.1",
         "port": 29430,
         "timeout_seconds": 5.0,
@@ -108,5 +113,6 @@ def test_build_reward_and_geode_configs_from_args() -> None:
     geode_config = _build_geode_config(namespace)
 
     assert reward_config.success_percent == 100.0
+    assert reward_config.reward_style == "progress"
     assert geode_config.stop_on_success is True
     assert geode_config.require_progress_tick == 120

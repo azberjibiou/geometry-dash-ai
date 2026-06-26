@@ -53,6 +53,7 @@ class ImitationSample:
     frame_paths: tuple[str, ...]
     progress: float
     input_down: bool
+    target_input_down: bool
     x: float
     y: float
     x_vel: float
@@ -81,6 +82,11 @@ class ImitationSample:
             frame_paths=tuple(_as_str_sequence(data, "frame_paths")),
             progress=_as_float(data, "progress"),
             input_down=_as_bool(data, "input_down"),
+            target_input_down=_as_optional_bool_from_mapping(
+                data,
+                "target_input_down",
+                fallback_key="input_down",
+            ),
             x=_as_float(data, "x"),
             y=_as_float(data, "y"),
             x_vel=_as_float(data, "x_vel"),
@@ -228,6 +234,7 @@ def build_imitation_samples(
             raise DatasetPrepError(f"label tick {label_tick} is missing from trace")
 
         row = trace_by_tick[record.tick]
+        label_row = trace_by_tick[label_tick]
         label_events = _events_for_label_tick(
             events_by_tick,
             label_tick=label_tick,
@@ -242,6 +249,7 @@ def build_imitation_samples(
                 frame_paths=tuple(item.frame_path for item in window_records),
                 progress=row.percent,
                 input_down=row.input_down,
+                target_input_down=label_row.input_down,
                 x=row.x,
                 y=row.y,
                 x_vel=row.x_vel,
@@ -437,6 +445,20 @@ def _as_bool(data: Mapping[str, Any], key: str) -> bool:
     if not isinstance(value, bool):
         raise DatasetPrepError(f"{key} must be a bool")
     return value
+
+
+def _as_optional_bool_from_mapping(
+    data: Mapping[str, Any],
+    key: str,
+    *,
+    fallback_key: str,
+) -> bool:
+    if key in data:
+        value = data[key]
+        if not isinstance(value, bool):
+            raise DatasetPrepError(f"{key} must be a bool")
+        return value
+    return _as_bool(data, fallback_key)
 
 
 def _as_str(data: Mapping[str, Any], key: str) -> str:

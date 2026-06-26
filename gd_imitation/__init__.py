@@ -41,6 +41,14 @@ from gd_imitation.image_dataset import (
     read_bmp_grayscale_resized,
     resize_grayscale_frame,
 )
+from gd_imitation.state_decoder import (
+    StateDecoderConfig,
+    StateDecoderError,
+    StatePredictionPoint,
+    decode_state_predictions,
+    load_state_prediction_jsonl,
+    state_level_metrics,
+)
 
 __all__ = [
     "BaselineTrainingConfig",
@@ -57,9 +65,13 @@ __all__ = [
     "ImageDatasetError",
     "ImageInputSample",
     "PredictionPoint",
+    "StateDecoderConfig",
+    "StateDecoderError",
+    "StatePredictionPoint",
     "binary_classification_metrics",
     "build_imitation_samples",
     "decode_predictions",
+    "decode_state_predictions",
     "event_level_metrics",
     "load_image_dataset",
     "load_image_input_sample",
@@ -68,11 +80,13 @@ __all__ = [
     "load_prediction_jsonl",
     "load_prepared_image_dataset",
     "load_samples_jsonl",
+    "load_state_prediction_jsonl",
     "predict_baseline_from_checkpoint",
     "read_bmp_grayscale",
     "read_bmp_grayscale_resized",
     "resize_grayscale_frame",
     "select_event_candidates",
+    "state_level_metrics",
     "split_imitation_samples",
     "train_baseline_from_dataset_dir",
     "train_imitation_baseline",

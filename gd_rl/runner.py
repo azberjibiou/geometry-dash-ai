@@ -7,8 +7,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
-from gd_human_model import HumanProfile, humanize_macro
-from gd_trace import Macro, TraceRow, save_macro_json, save_trace_jsonl
+from gd_human_model import Event, HumanProfile, humanize_macro
+from gd_trace import (
+    Macro,
+    TraceRow,
+    save_macro_json,
+    save_trace_jsonl,
+    trace_input_macro,
+)
 
 from gd_rl.policy import PracticeContext, PracticePolicy
 from gd_rl.results import AttemptResult, PracticeRunSummary
@@ -141,6 +147,16 @@ class PracticeRunner:
             )
             trace_path = attempt_dir / "trace.jsonl"
             save_trace_jsonl(rows, trace_path)
+            trace_input_path = attempt_dir / "trace_input_events.json"
+            observed_input_macro = trace_input_macro(
+                rows,
+                metadata={
+                    "level_id": self.config.level_id,
+                    "attempt_index": attempt_index,
+                    "policy_name": self.policy.name,
+                },
+            )
+            save_macro_json(observed_input_macro, trace_input_path)
             outcome = summarize_trace_outcome(
                 rows,
                 success_percent=self.config.success_percent,
@@ -175,6 +191,8 @@ class PracticeRunner:
                 intended_event_count=len(intended_macro.events),
                 executed_event_count=len(executed_macro.events),
                 dropped_event_count=humanized.missed_event_count,
+                trace_input_events_path=str(trace_input_path),
+                trace_input_event_count=len(observed_input_macro.events),
                 metadata={
                     "policy_name": self.policy.name,
                     "timing_reference": self.config.timing_reference,

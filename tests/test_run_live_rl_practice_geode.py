@@ -34,7 +34,7 @@ def args(**overrides: object) -> argparse.Namespace:
         "success_percent": 100.0,
         "action_horizon_ticks": 1,
         "observation_buffer_size": None,
-        "post_terminal_delay_seconds": 5.0,
+        "post_terminal_delay_seconds": 8.0,
         "start_guard_reset_retries": 3,
         "start_guard_retry_delay_seconds": 1.0,
         "require_start_percent_max": 2.0,
@@ -56,6 +56,7 @@ def args(**overrides: object) -> argparse.Namespace:
         "normalize_returns": False,
         "deterministic_actions": False,
         "learner_seed": 0,
+        "reward_style": "progress",
         "progress_scale": 1.0,
         "best_progress_bonus_scale": 0.5,
         "section_size_percent": 10.0,
@@ -64,6 +65,10 @@ def args(**overrides: object) -> argparse.Namespace:
         "death_penalty": 10.0,
         "excessive_input_free_events": 0,
         "excessive_input_penalty": 0.0,
+        "default_reward": 0.01,
+        "jump_punishment": 0.0,
+        "checkpoint_reward": 0.0,
+        "checkpoint_size_percent": 3.0,
         "algorithm": "a2c",
         "value_loss_weight": 0.5,
         "normalize_advantages": False,
@@ -74,8 +79,10 @@ def args(**overrides: object) -> argparse.Namespace:
         "input_rate_penalty": 0.0,
         "repeat_action_penalty": 0.0,
         "repeat_action_penalty_free_decisions": 0,
-        "epsilon_start": 0.20,
-        "epsilon_end": 0.05,
+        "epsilon_schedule": "picklegawd",
+        "epsilon_start": 1.0,
+        "epsilon_end": 0.01,
+        "epsilon_decay_rate": 0.995,
         "epsilon_decay_steps": 1000,
         "eval_attempts": 0,
         "eval_interval_attempts": 0,
@@ -83,6 +90,9 @@ def args(**overrides: object) -> argparse.Namespace:
         "dqn_replay_capacity": 2048,
         "dqn_warmup_steps": 32,
         "dqn_target_update_interval": 100,
+        "dqn_success_replay_fraction": 0.25,
+        "dqn_terminal_replay_fraction": 0.25,
+        "dqn_success_reward_threshold": 50.0,
         "n_step_return": 1,
         "no_double_dqn": False,
         "min_dwell_ticks": 4,
@@ -107,10 +117,11 @@ def test_build_live_rl_configs_keep_smoke_defaults() -> None:
     dqn_config = _build_dqn_config(namespace)
 
     assert env_config.max_steps == 600
-    assert env_config.post_terminal_delay_seconds == 5.0
+    assert env_config.post_terminal_delay_seconds == 8.0
     assert env_config.start_guard_reset_retries == 3
     assert env_config.require_start_percent_max == 2.0
     assert env_config.require_start_x_max == 50.0
+    assert env_config.reward_config.reward_style == "progress"
     assert policy_config.device == "cpu"
     assert policy_config.encoder.max_tick == namespace.max_steps
     assert policy_config.encoder.pending_event_scale == 4.0
@@ -128,13 +139,18 @@ def test_build_live_rl_configs_keep_smoke_defaults() -> None:
     assert _build_actor_critic_config(args(no_grad_clip=True)).max_grad_norm is None
     assert dqn_config.attempts == 1
     assert dqn_config.history_length == 4
-    assert dqn_config.epsilon_start == 0.20
-    assert dqn_config.epsilon_end == 0.05
+    assert dqn_config.epsilon_schedule == "picklegawd"
+    assert dqn_config.epsilon_start == 1.0
+    assert dqn_config.epsilon_end == 0.01
+    assert dqn_config.epsilon_decay_rate == 0.995
     assert dqn_config.eval_attempts == 0
     assert dqn_config.eval_interval_attempts == 0
     assert dqn_config.batch_size == 32
     assert dqn_config.replay_capacity == 2048
     assert dqn_config.warmup_steps == 32
+    assert dqn_config.success_replay_fraction == 0.25
+    assert dqn_config.terminal_replay_fraction == 0.25
+    assert dqn_config.success_reward_threshold == 50.0
     assert dqn_config.double_dqn is True
     assert dqn_config.n_step_return == 1
     assert dqn_config.repeat_action_penalty == 0.0
@@ -143,6 +159,18 @@ def test_build_live_rl_configs_keep_smoke_defaults() -> None:
     assert dqn_config.decision_stride == 1
     assert dqn_config.max_grad_norm == 1.0
     assert _build_dqn_config(args(no_grad_clip=True)).max_grad_norm is None
+
+    no_cap_namespace = args(max_steps=0)
+    no_cap_reward_config = _build_reward_config(no_cap_namespace)
+    no_cap_env_config = _build_env_config(
+        no_cap_namespace,
+        output_dir=no_cap_namespace.output_dir,
+        reward_config=no_cap_reward_config,
+        run_id="test_run_no_cap",
+    )
+    no_cap_policy_config = _build_policy_config(no_cap_namespace)
+    assert no_cap_env_config.max_steps == 0
+    assert no_cap_policy_config.encoder.max_tick == 1200
 
 
 def test_live_rl_cli_runs_with_fake_client_and_writes_summary(

@@ -30,6 +30,7 @@ def test_samples_align_frames_trace_state_and_event_labels() -> None:
     by_tick = {sample.tick: sample for sample in samples}
     assert by_tick[2].progress == 52.0
     assert by_tick[2].input_down is True
+    assert by_tick[2].target_input_down is True
     assert by_tick[3].press_event is True
     assert by_tick[3].release_event is False
     assert by_tick[4].press_event is False
@@ -50,6 +51,7 @@ def test_delayed_label_shift_uses_future_event_tick() -> None:
 
     by_tick = {sample.tick: sample for sample in samples}
     assert by_tick[3].label_tick == 5
+    assert by_tick[3].target_input_down is False
     assert by_tick[3].press_event is True
     assert by_tick[5].label_tick == 7
     assert by_tick[5].press_event is False
