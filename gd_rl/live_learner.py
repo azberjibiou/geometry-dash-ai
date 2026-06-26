@@ -6,7 +6,7 @@ import random
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol, Sequence
+from typing import Any, Callable, Literal, Protocol, Sequence
 
 from gd_rl.actions import ActionKind, IntendedAction
 from gd_rl.live_env import LivePracticeObservation, LiveStepResult
@@ -54,11 +54,18 @@ class LiveObservationEncoderConfig:
     y_scale: float = 500.0
     velocity_scale: float = 20.0
     rotation_scale: float = 360.0
+    pending_event_scale: float = 4.0
 
     def __post_init__(self) -> None:
         if self.max_tick <= 0:
             raise LiveLearnerError("max_tick must be positive")
-        for field_name in ("x_scale", "y_scale", "velocity_scale", "rotation_scale"):
+        for field_name in (
+            "x_scale",
+            "y_scale",
+            "velocity_scale",
+            "rotation_scale",
+            "pending_event_scale",
+        ):
             if getattr(self, field_name) <= 0.0:
                 raise LiveLearnerError(f"{field_name} must be positive")
 
@@ -92,6 +99,7 @@ class ReinforceConfig:
     deterministic_actions: bool = False
     seed: int = 0
     min_dwell_ticks: int = 4
+    decision_stride: int = 1
 
     def __post_init__(self) -> None:
         if self.attempts <= 0:
@@ -106,6 +114,8 @@ class ReinforceConfig:
             raise LiveLearnerError("max_grad_norm must be positive or None")
         if self.min_dwell_ticks < 0:
             raise LiveLearnerError("min_dwell_ticks must be non-negative")
+        if self.decision_stride <= 0:
+            raise LiveLearnerError("decision_stride must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +136,7 @@ class ActorCriticConfig:
     death_local_penalty: float = 1.0
     input_rate_penalty: float = 0.0
     min_dwell_ticks: int = 4
+    decision_stride: int = 1
 
     def __post_init__(self) -> None:
         if self.attempts <= 0:
@@ -150,6 +161,8 @@ class ActorCriticConfig:
             raise LiveLearnerError("input_rate_penalty must be non-negative")
         if self.min_dwell_ticks < 0:
             raise LiveLearnerError("min_dwell_ticks must be non-negative")
+        if self.decision_stride <= 0:
+            raise LiveLearnerError("decision_stride must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,12 +179,19 @@ class DQNConfig:
     replay_capacity: int = 2048
     warmup_steps: int = 32
     target_update_interval: int = 100
+    double_dqn: bool = True
+    n_step_return: int = 1
     max_grad_norm: float | None = 1.0
     deterministic_actions: bool = False
     seed: int = 0
     history_length: int = 4
     input_rate_penalty: float = 0.0
+    repeat_action_penalty: float = 0.0
+    repeat_action_penalty_free_decisions: int = 0
     min_dwell_ticks: int = 4
+    decision_stride: int = 1
+    eval_attempts: int = 0
+    eval_interval_attempts: int = 0
     skip_replay_death_reasons: tuple[str, ...] = ("tick_rewind_reset",)
 
     def __post_init__(self) -> None:
@@ -197,14 +217,28 @@ class DQNConfig:
             raise LiveLearnerError("warmup_steps must be non-negative")
         if self.target_update_interval <= 0:
             raise LiveLearnerError("target_update_interval must be positive")
+        if self.n_step_return <= 0:
+            raise LiveLearnerError("n_step_return must be positive")
         if self.max_grad_norm is not None and self.max_grad_norm <= 0.0:
             raise LiveLearnerError("max_grad_norm must be positive or None")
         if self.history_length < 0:
             raise LiveLearnerError("history_length must be non-negative")
         if self.input_rate_penalty < 0.0:
             raise LiveLearnerError("input_rate_penalty must be non-negative")
+        if self.repeat_action_penalty < 0.0:
+            raise LiveLearnerError("repeat_action_penalty must be non-negative")
+        if self.repeat_action_penalty_free_decisions < 0:
+            raise LiveLearnerError(
+                "repeat_action_penalty_free_decisions must be non-negative"
+            )
         if self.min_dwell_ticks < 0:
             raise LiveLearnerError("min_dwell_ticks must be non-negative")
+        if self.decision_stride <= 0:
+            raise LiveLearnerError("decision_stride must be positive")
+        if self.eval_attempts < 0:
+            raise LiveLearnerError("eval_attempts must be non-negative")
+        if self.eval_interval_attempts < 0:
+            raise LiveLearnerError("eval_interval_attempts must be non-negative")
         if any(not reason for reason in self.skip_replay_death_reasons):
             raise LiveLearnerError("skip_replay_death_reasons cannot contain empty values")
 
@@ -443,6 +477,7 @@ class ReinforceAttemptSummary:
 
     attempt_index: int
     step_count: int
+    decision_count: int
     total_step_reward: float
     loss: float
     policy_loss: float
@@ -463,6 +498,7 @@ class ActorCriticAttemptSummary:
 
     attempt_index: int
     step_count: int
+    decision_count: int
     total_step_reward: float
     total_training_reward: float
     loss: float
@@ -526,6 +562,7 @@ class DQNAttemptSummary:
 
     attempt_index: int
     step_count: int
+    decision_count: int
     total_step_reward: float
     total_training_reward: float
     mean_loss: float | None
@@ -538,14 +575,96 @@ class DQNAttemptSummary:
     epsilon_start: float
     epsilon_end: float
     q_value_stats: dict[str, float]
+    q_margin_stats: dict[str, float]
     action_counts: dict[str, int]
     effective_action_counts: dict[str, int]
+    greedy_action_counts: dict[str, int]
     dwell_blocked_count: int
     intent_counts: dict[str, int]
+    action_diagnostics: dict[str, Any]
     attempt_result: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class DQNEvaluationAttemptSummary:
+    """Greedy policy metrics for one DQN evaluation attempt."""
+
+    eval_index: int
+    attempt_index: int
+    step_count: int
+    decision_count: int
+    total_step_reward: float
+    q_value_stats: dict[str, float]
+    q_margin_stats: dict[str, float]
+    action_counts: dict[str, int]
+    effective_action_counts: dict[str, int]
+    greedy_action_counts: dict[str, int]
+    dwell_blocked_count: int
+    intent_counts: dict[str, int]
+    action_diagnostics: dict[str, Any]
+    attempt_result: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class DQNEvaluationRunSummary:
+    """Greedy DQN evaluation block run after a training attempt."""
+
+    after_attempt_index: int
+    attempts: list[DQNEvaluationAttemptSummary]
+
+    @property
+    def eval_attempt_count(self) -> int:
+        return len(self.attempts)
+
+    @property
+    def clear_count(self) -> int:
+        return sum(
+            1
+            for attempt in self.attempts
+            if bool(attempt.attempt_result.get("cleared", False))
+        )
+
+    @property
+    def clear_rate(self) -> float:
+        if not self.attempts:
+            return 0.0
+        return self.clear_count / len(self.attempts)
+
+    @property
+    def best_percent_overall(self) -> float:
+        values = _attempt_result_float_values(self.attempts, "best_percent")
+        return max(values) if values else 0.0
+
+    @property
+    def mean_best_percent(self) -> float:
+        values = _attempt_result_float_values(self.attempts, "best_percent")
+        return sum(values) / len(values) if values else 0.0
+
+    @property
+    def mean_total_step_reward(self) -> float:
+        if not self.attempts:
+            return 0.0
+        return sum(attempt.total_step_reward for attempt in self.attempts) / len(
+            self.attempts
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "after_attempt_index": self.after_attempt_index,
+            "eval_attempt_count": self.eval_attempt_count,
+            "clear_count": self.clear_count,
+            "clear_rate": self.clear_rate,
+            "best_percent_overall": self.best_percent_overall,
+            "mean_best_percent": self.mean_best_percent,
+            "mean_total_step_reward": self.mean_total_step_reward,
+            "attempts": [attempt.to_dict() for attempt in self.attempts],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,6 +673,7 @@ class DQNTrainingSummary:
 
     attempts: list[DQNAttemptSummary]
     config: dict[str, Any]
+    evaluation_runs: list[DQNEvaluationRunSummary] = field(default_factory=list)
 
     @property
     def attempt_count(self) -> int:
@@ -564,7 +684,19 @@ class DQNTrainingSummary:
             "attempt_count": self.attempt_count,
             "config": dict(self.config),
             "attempts": [attempt.to_dict() for attempt in self.attempts],
+            "evaluation_runs": [
+                evaluation.to_dict() for evaluation in self.evaluation_runs
+            ],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class RepeatedDecisionSteps:
+    """Live env steps produced by one policy decision."""
+
+    last_step: LiveStepResult
+    observation: LivePracticeObservation
+    rewards: list[float]
 
 
 class TinyLivePolicyNetwork:
@@ -816,6 +948,7 @@ class DQNTransition:
     terminated: bool | None = None
     truncated: bool = False
     aborted: bool = False
+    discount: float | None = None
 
     def __post_init__(self) -> None:
         terminated = self.terminated
@@ -827,6 +960,8 @@ class DQNTransition:
             raise LiveLearnerError(
                 "transition done must equal terminated or truncated or aborted"
             )
+        if self.discount is not None and not 0.0 <= self.discount <= 1.0:
+            raise LiveLearnerError("transition discount must be between 0 and 1")
 
 
 class DQNReplayBuffer:
@@ -1006,11 +1141,15 @@ def encode_live_observation(
         1.0 if source.completed else 0.0,
         1.0 if source.gravity == "reverse" else 0.0,
         *mode_features,
+        1.0 if observation.latest.input_down else 0.0,
+        1.0 if observation.latest.input_down != source.input_down else 0.0,
+        _clamp(observation.pending_event_count / effective_config.pending_event_scale),
+        _clamp((observation.latest.tick - source.tick) / effective_config.max_tick),
     ]
 
 
 def live_observation_feature_dim() -> int:
-    return 12 + len(MODE_ORDER)
+    return 16 + len(MODE_ORDER)
 
 
 def encode_actor_critic_observation(
@@ -1073,6 +1212,40 @@ def dqn_feature_dim(history_length: int = 4) -> int:
     return actor_critic_feature_dim(history_length)
 
 
+def _step_decision_stride(
+    env: LiveStepEnvLike,
+    *,
+    first_intent: IntendedAction,
+    observation: LivePracticeObservation,
+    decision_stride: int,
+) -> RepeatedDecisionSteps:
+    if decision_stride <= 0:
+        raise LiveLearnerError("decision_stride must be positive")
+
+    rewards: list[float] = []
+    current_observation = observation
+    last_step: LiveStepResult | None = None
+    for stride_index in range(decision_stride):
+        intent = (
+            first_intent
+            if stride_index == 0
+            else IntendedAction.no_op(current_observation.tick)
+        )
+        last_step = env.step(intent)
+        rewards.append(float(last_step.reward))
+        current_observation = last_step.observation
+        if last_step.done:
+            break
+
+    if last_step is None:
+        raise RuntimeError("decision stride produced no live steps")
+    return RepeatedDecisionSteps(
+        last_step=last_step,
+        observation=current_observation,
+        rewards=rewards,
+    )
+
+
 def run_reinforce_attempt(
     env: LiveStepEnvLike,
     policy: TinyLivePolicyNetwork,
@@ -1085,7 +1258,8 @@ def run_reinforce_attempt(
 
     effective_config = config or ReinforceConfig()
     observation = env.reset(attempt_index=attempt_index)
-    rewards: list[float] = []
+    step_rewards: list[float] = []
+    decision_rewards: list[float] = []
     log_probs: list[Any] = []
     entropies: list[Any] = []
     action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
@@ -1109,17 +1283,24 @@ def run_reinforce_attempt(
         if decision.dwell_blocked:
             dwell_blocked_count += 1
         intent_counts[decision.intent.kind] += 1
-        last_step = env.step(decision.intent)
-        rewards.append(float(last_step.reward))
+        repeated_steps = _step_decision_stride(
+            env,
+            first_intent=decision.intent,
+            observation=observation,
+            decision_stride=effective_config.decision_stride,
+        )
+        last_step = repeated_steps.last_step
+        step_rewards.extend(repeated_steps.rewards)
+        decision_rewards.append(sum(repeated_steps.rewards))
         log_probs.append(decision.log_probability_tensor)
         entropies.append(decision.entropy_tensor)
-        observation = last_step.observation
+        observation = repeated_steps.observation
         if last_step.done:
             break
 
     returns = _discounted_returns(
         policy.torch,
-        rewards,
+        decision_rewards,
         gamma=effective_config.gamma,
         normalize=effective_config.normalize_returns,
         device=policy.device,
@@ -1151,8 +1332,9 @@ def run_reinforce_attempt(
 
     return ReinforceAttemptSummary(
         attempt_index=attempt_index,
-        step_count=len(rewards),
-        total_step_reward=sum(rewards),
+        step_count=len(step_rewards),
+        decision_count=len(decision_rewards),
+        total_step_reward=sum(step_rewards),
         loss=float(loss_tensor.detach().cpu().item()),
         policy_loss=float(policy_loss_tensor.detach().cpu().item()),
         entropy=float(entropy_tensor_sum.detach().cpu().item()),
@@ -1250,22 +1432,29 @@ def run_actor_critic_attempt(
         if decision.dwell_blocked:
             dwell_blocked_count += 1
         intent_counts[decision.intent.kind] += 1
-        last_step = env.step(decision.intent)
-        base_reward = float(last_step.reward)
+        repeated_steps = _step_decision_stride(
+            env,
+            first_intent=decision.intent,
+            observation=observation,
+            decision_stride=effective_config.decision_stride,
+        )
+        last_step = repeated_steps.last_step
+        base_reward = sum(repeated_steps.rewards)
         rate_penalty = (
             -effective_config.input_rate_penalty
             if decision.intent.kind != "no_op"
             else 0.0
         )
         step_reward = base_reward + rate_penalty
-        step_rewards.append(base_reward)
+        decision_index = len(training_rewards) + 1
+        step_rewards.extend(repeated_steps.rewards)
         training_rewards.append(step_reward)
         log_probs.append(decision.log_probability_tensor)
         entropies.append(decision.entropy_tensor)
         values.append(decision.value_tensor)
         trajectory_steps.append(
             _trajectory_step_summary(
-                step_index=len(step_rewards),
+                step_index=decision_index,
                 observation=observation,
                 decision=decision,
                 env_reward=base_reward,
@@ -1279,7 +1468,7 @@ def run_actor_critic_attempt(
             intent_kind=decision.intent.kind,
             dwell_blocked=decision.dwell_blocked,
         )
-        observation = last_step.observation
+        observation = repeated_steps.observation
         if last_step.done:
             break
 
@@ -1335,6 +1524,7 @@ def run_actor_critic_attempt(
     return ActorCriticAttemptSummary(
         attempt_index=attempt_index,
         step_count=len(step_rewards),
+        decision_count=len(training_rewards),
         total_step_reward=sum(step_rewards),
         total_training_reward=sum(training_rewards),
         loss=float(loss_tensor.detach().cpu().item()),
@@ -1420,10 +1610,18 @@ def run_dqn_attempt(
     training_rewards: list[float] = []
     losses: list[float] = []
     selected_q_values: list[float] = []
+    q_margins: list[float] = []
     action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
     effective_action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    greedy_action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
     dwell_blocked_count = 0
     intent_counts = {kind: 0 for kind in ACTION_KINDS}
+    selected_state_sequence: list[str] = []
+    effective_state_sequence: list[str] = []
+    intent_sequence: list[str] = []
+    repeat_action_penalty_total = 0.0
+    current_selected_run_state: str | None = None
+    current_selected_run_length = 0
     pending_transitions: list[DQNTransition] = []
     intent_adapter = ButtonStateIntentAdapter(
         min_dwell_ticks=effective_config.min_dwell_ticks
@@ -1453,20 +1651,44 @@ def run_dqn_attempt(
         )
         action_counts[decision.desired_input_state] += 1
         effective_action_counts[decision.effective_input_state] += 1
+        greedy_state = DESIRED_INPUT_STATES[
+            _max_index(decision.q_values)
+        ]
+        greedy_action_counts[greedy_state] += 1
         if decision.dwell_blocked:
             dwell_blocked_count += 1
         intent_counts[decision.intent.kind] += 1
         selected_q_values.append(decision.q_values[decision.action_index])
+        q_margins.append(decision.q_values[1] - decision.q_values[0])
+        selected_state_sequence.append(decision.desired_input_state)
+        effective_state_sequence.append(decision.effective_input_state)
+        intent_sequence.append(decision.intent.kind)
+        if current_selected_run_state == decision.desired_input_state:
+            current_selected_run_length += 1
+        else:
+            current_selected_run_state = decision.desired_input_state
+            current_selected_run_length = 1
 
-        last_step = env.step(decision.intent)
-        base_reward = float(last_step.reward)
+        repeated_steps = _step_decision_stride(
+            env,
+            first_intent=decision.intent,
+            observation=observation,
+            decision_stride=effective_config.decision_stride,
+        )
+        last_step = repeated_steps.last_step
+        base_reward = sum(repeated_steps.rewards)
         rate_penalty = (
             -effective_config.input_rate_penalty
             if decision.intent.kind != "no_op"
             else 0.0
         )
-        step_reward = base_reward + rate_penalty
-        step_rewards.append(base_reward)
+        repeat_penalty = _dqn_repeat_action_penalty(
+            current_selected_run_length,
+            config=effective_config,
+        )
+        repeat_action_penalty_total += repeat_penalty
+        step_reward = base_reward + rate_penalty + repeat_penalty
+        step_rewards.extend(repeated_steps.rewards)
         training_rewards.append(step_reward)
 
         history.append(
@@ -1476,7 +1698,7 @@ def run_dqn_attempt(
             dwell_blocked=decision.dwell_blocked,
         )
         next_features = encode_dqn_observation(
-            last_step.observation,
+            repeated_steps.observation,
             history=history,
             history_length=effective_config.history_length,
             config=policy.config.encoder,
@@ -1494,7 +1716,7 @@ def run_dqn_attempt(
             )
         )
 
-        observation = last_step.observation
+        observation = repeated_steps.observation
         if last_step.done:
             break
 
@@ -1505,7 +1727,11 @@ def run_dqn_attempt(
     )
     if replay_skip_reason is None:
         committed_step = global_step_start
-        for transition in pending_transitions:
+        replay_transitions = _expand_dqn_n_step_transitions(
+            pending_transitions,
+            config=effective_config,
+        )
+        for transition in replay_transitions:
             replay_buffer.append(transition)
             replay_appended_count += 1
             committed_step += 1
@@ -1524,6 +1750,7 @@ def run_dqn_attempt(
     return DQNAttemptSummary(
         attempt_index=attempt_index,
         step_count=len(step_rewards),
+        decision_count=len(training_rewards),
         total_step_reward=sum(step_rewards),
         total_training_reward=sum(training_rewards),
         mean_loss=(sum(losses) / len(losses)) if losses else None,
@@ -1536,13 +1763,163 @@ def run_dqn_attempt(
         epsilon_start=epsilon_first if epsilon_first is not None else 0.0,
         epsilon_end=epsilon_last,
         q_value_stats=_float_stats(selected_q_values),
+        q_margin_stats=_float_stats(q_margins),
         action_counts={kind: int(count) for kind, count in action_counts.items()},
         effective_action_counts={
             kind: int(count) for kind, count in effective_action_counts.items()
         },
+        greedy_action_counts={
+            kind: int(count) for kind, count in greedy_action_counts.items()
+        },
         dwell_blocked_count=dwell_blocked_count,
         intent_counts={kind: int(count) for kind, count in intent_counts.items()},
+        action_diagnostics=_dqn_action_diagnostics(
+            action_counts=action_counts,
+            effective_action_counts=effective_action_counts,
+            greedy_action_counts=greedy_action_counts,
+            intent_counts=intent_counts,
+            selected_state_sequence=selected_state_sequence,
+            effective_state_sequence=effective_state_sequence,
+            intent_sequence=intent_sequence,
+            q_margins=q_margins,
+            repeat_action_penalty_total=repeat_action_penalty_total,
+        ),
         attempt_result=attempt_result,
+    )
+
+
+def run_dqn_evaluation_attempt(
+    env: LiveStepEnvLike,
+    policy: TinyLiveDQNNetwork,
+    *,
+    attempt_index: int,
+    eval_index: int,
+    config: DQNConfig | None = None,
+) -> DQNEvaluationAttemptSummary:
+    """Run one deterministic DQN evaluation attempt without training updates."""
+
+    effective_config = config or DQNConfig()
+    observation = env.reset(attempt_index=attempt_index)
+    step_rewards: list[float] = []
+    selected_q_values: list[float] = []
+    q_margins: list[float] = []
+    action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    effective_action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    greedy_action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    dwell_blocked_count = 0
+    intent_counts = {kind: 0 for kind in ACTION_KINDS}
+    selected_state_sequence: list[str] = []
+    effective_state_sequence: list[str] = []
+    intent_sequence: list[str] = []
+    intent_adapter = ButtonStateIntentAdapter(
+        min_dwell_ticks=effective_config.min_dwell_ticks
+    )
+    intent_adapter.reset(observation)
+    history = LiveActionHistory(length=effective_config.history_length)
+    decision_count = 0
+    last_step: LiveStepResult | None = None
+
+    while True:
+        with policy.torch.no_grad():
+            decision = policy.act(
+                observation,
+                intent_adapter=intent_adapter,
+                history=history,
+                epsilon=0.0,
+                deterministic=True,
+            )
+        decision_count += 1
+        action_counts[decision.desired_input_state] += 1
+        effective_action_counts[decision.effective_input_state] += 1
+        greedy_state = DESIRED_INPUT_STATES[
+            _max_index(decision.q_values)
+        ]
+        greedy_action_counts[greedy_state] += 1
+        if decision.dwell_blocked:
+            dwell_blocked_count += 1
+        intent_counts[decision.intent.kind] += 1
+        selected_q_values.append(decision.q_values[decision.action_index])
+        q_margins.append(decision.q_values[1] - decision.q_values[0])
+        selected_state_sequence.append(decision.desired_input_state)
+        effective_state_sequence.append(decision.effective_input_state)
+        intent_sequence.append(decision.intent.kind)
+
+        repeated_steps = _step_decision_stride(
+            env,
+            first_intent=decision.intent,
+            observation=observation,
+            decision_stride=effective_config.decision_stride,
+        )
+        last_step = repeated_steps.last_step
+        step_rewards.extend(repeated_steps.rewards)
+        history.append(
+            selected_desired_state=decision.desired_input_state,
+            commanded_input_state=decision.effective_input_state,
+            intent_kind=decision.intent.kind,
+            dwell_blocked=decision.dwell_blocked,
+        )
+        observation = repeated_steps.observation
+        if last_step.done:
+            break
+
+    return DQNEvaluationAttemptSummary(
+        eval_index=eval_index,
+        attempt_index=attempt_index,
+        step_count=len(step_rewards),
+        decision_count=decision_count,
+        total_step_reward=sum(step_rewards),
+        q_value_stats=_float_stats(selected_q_values),
+        q_margin_stats=_float_stats(q_margins),
+        action_counts={kind: int(count) for kind, count in action_counts.items()},
+        effective_action_counts={
+            kind: int(count) for kind, count in effective_action_counts.items()
+        },
+        greedy_action_counts={
+            kind: int(count) for kind, count in greedy_action_counts.items()
+        },
+        dwell_blocked_count=dwell_blocked_count,
+        intent_counts={kind: int(count) for kind, count in intent_counts.items()},
+        action_diagnostics=_dqn_action_diagnostics(
+            action_counts=action_counts,
+            effective_action_counts=effective_action_counts,
+            greedy_action_counts=greedy_action_counts,
+            intent_counts=intent_counts,
+            selected_state_sequence=selected_state_sequence,
+            effective_state_sequence=effective_state_sequence,
+            intent_sequence=intent_sequence,
+            q_margins=q_margins,
+            repeat_action_penalty_total=0.0,
+        ),
+        attempt_result=_attempt_result_from_last_step(env, last_step),
+    )
+
+
+def run_dqn_evaluation(
+    env: LiveStepEnvLike,
+    policy: TinyLiveDQNNetwork,
+    *,
+    after_attempt_index: int,
+    attempt_index_start: int,
+    config: DQNConfig | None = None,
+) -> DQNEvaluationRunSummary:
+    """Run a deterministic block of DQN evaluation attempts."""
+
+    effective_config = config or DQNConfig()
+    if effective_config.eval_attempts <= 0:
+        raise LiveLearnerError("eval_attempts must be positive for evaluation")
+    attempts = [
+        run_dqn_evaluation_attempt(
+            env,
+            policy,
+            attempt_index=attempt_index_start + eval_index - 1,
+            eval_index=eval_index,
+            config=effective_config,
+        )
+        for eval_index in range(1, effective_config.eval_attempts + 1)
+    ]
+    return DQNEvaluationRunSummary(
+        after_attempt_index=after_attempt_index,
+        attempts=attempts,
     )
 
 
@@ -1552,6 +1929,7 @@ def run_dqn_training(
     *,
     config: DQNConfig | None = None,
     summary_path: str | Path | None = None,
+    evaluation_callback: Callable[[DQNEvaluationRunSummary], None] | None = None,
 ) -> DQNTrainingSummary:
     """Run a short DQN baseline practice session."""
 
@@ -1562,6 +1940,8 @@ def run_dqn_training(
     replay_buffer = DQNReplayBuffer(effective_config.replay_capacity)
     global_step = 0
     attempts: list[DQNAttemptSummary] = []
+    evaluation_runs: list[DQNEvaluationRunSummary] = []
+    next_evaluation_attempt_index = effective_config.attempts + 1
     for attempt_index in range(1, effective_config.attempts + 1):
         attempt = run_dqn_attempt(
             env,
@@ -1574,6 +1954,18 @@ def run_dqn_training(
         )
         attempts.append(attempt)
         global_step += attempt.replay_appended_count
+        if _should_run_dqn_evaluation(effective_config, attempt_index):
+            evaluation = run_dqn_evaluation(
+                env,
+                policy,
+                after_attempt_index=attempt_index,
+                attempt_index_start=next_evaluation_attempt_index,
+                config=effective_config,
+            )
+            evaluation_runs.append(evaluation)
+            next_evaluation_attempt_index += effective_config.eval_attempts
+            if evaluation_callback is not None:
+                evaluation_callback(evaluation)
 
     summary = DQNTrainingSummary(
         attempts=attempts,
@@ -1594,6 +1986,7 @@ def run_dqn_training(
                 ),
             },
         },
+        evaluation_runs=evaluation_runs,
     )
     if summary_path is not None:
         _write_json(summary.to_dict(), Path(summary_path))
@@ -1797,6 +2190,196 @@ def _compact_recent_steps(steps: Sequence[dict[str, Any]]) -> list[dict[str, Any
     return [{key: step.get(key) for key in keys} for step in steps]
 
 
+def _should_run_dqn_evaluation(config: DQNConfig, attempt_index: int) -> bool:
+    if config.eval_attempts <= 0:
+        return False
+    if attempt_index == config.attempts:
+        return True
+    return (
+        config.eval_interval_attempts > 0
+        and attempt_index % config.eval_interval_attempts == 0
+    )
+
+
+def _dqn_repeat_action_penalty(
+    selected_state_run_length: int,
+    *,
+    config: DQNConfig,
+) -> float:
+    if config.repeat_action_penalty == 0.0:
+        return 0.0
+    if selected_state_run_length <= config.repeat_action_penalty_free_decisions:
+        return 0.0
+    return -config.repeat_action_penalty
+
+
+def _dqn_action_diagnostics(
+    *,
+    action_counts: dict[str, int],
+    effective_action_counts: dict[str, int],
+    greedy_action_counts: dict[str, int],
+    intent_counts: dict[str, int],
+    selected_state_sequence: Sequence[str],
+    effective_state_sequence: Sequence[str],
+    intent_sequence: Sequence[str],
+    q_margins: Sequence[float],
+    repeat_action_penalty_total: float,
+) -> dict[str, Any]:
+    decision_count = len(selected_state_sequence)
+    max_selected_run = _max_consecutive_run(selected_state_sequence)
+    max_effective_run = _max_consecutive_run(effective_state_sequence)
+    max_intent_run = _max_consecutive_run(intent_sequence)
+    selected_fractions = _count_fractions(action_counts, decision_count)
+    effective_fractions = _count_fractions(effective_action_counts, decision_count)
+    greedy_fractions = _count_fractions(greedy_action_counts, decision_count)
+    intent_fractions = _count_fractions(intent_counts, decision_count)
+    q_hold_positive_count = sum(1 for margin in q_margins if margin > 0.0)
+    q_idle_positive_count = sum(1 for margin in q_margins if margin < 0.0)
+    q_tie_count = len(q_margins) - q_hold_positive_count - q_idle_positive_count
+    dominant_selected_fraction = max(selected_fractions.values(), default=0.0)
+    dominant_effective_fraction = max(effective_fractions.values(), default=0.0)
+    dominant_greedy_fraction = max(greedy_fractions.values(), default=0.0)
+    no_op_fraction = intent_fractions.get("no_op", 0.0)
+    max_selected_run_fraction = (
+        max_selected_run / decision_count if decision_count else 0.0
+    )
+    max_effective_run_fraction = (
+        max_effective_run / decision_count if decision_count else 0.0
+    )
+    max_intent_run_fraction = max_intent_run / decision_count if decision_count else 0.0
+    collapse_threshold = 0.95
+    return {
+        "decision_count": decision_count,
+        "selected_action_fractions": selected_fractions,
+        "effective_action_fractions": effective_fractions,
+        "greedy_action_fractions": greedy_fractions,
+        "intent_fractions": intent_fractions,
+        "max_selected_state_run": max_selected_run,
+        "max_effective_state_run": max_effective_run,
+        "max_intent_run": max_intent_run,
+        "max_selected_state_run_fraction": max_selected_run_fraction,
+        "max_effective_state_run_fraction": max_effective_run_fraction,
+        "max_intent_run_fraction": max_intent_run_fraction,
+        "q_margin_sign_counts": {
+            "hold_greater": q_hold_positive_count,
+            "idle_greater": q_idle_positive_count,
+            "tied": q_tie_count,
+        },
+        "repeat_action_penalty_total": repeat_action_penalty_total,
+        "collapse_flags": {
+            "selected_action_collapse": (
+                decision_count > 0 and dominant_selected_fraction >= collapse_threshold
+            ),
+            "effective_action_collapse": (
+                decision_count > 0 and dominant_effective_fraction >= collapse_threshold
+            ),
+            "greedy_action_collapse": (
+                decision_count > 0 and dominant_greedy_fraction >= collapse_threshold
+            ),
+            "no_op_collapse": (
+                decision_count > 0 and no_op_fraction >= collapse_threshold
+            ),
+            "selected_run_collapse": (
+                decision_count > 0
+                and max_selected_run_fraction >= collapse_threshold
+            ),
+            "effective_run_collapse": (
+                decision_count > 0
+                and max_effective_run_fraction >= collapse_threshold
+            ),
+            "intent_run_collapse": (
+                decision_count > 0 and max_intent_run_fraction >= collapse_threshold
+            ),
+        },
+    }
+
+
+def _count_fractions(counts: dict[str, int], total: int) -> dict[str, float]:
+    if total <= 0:
+        return {key: 0.0 for key in counts}
+    return {key: count / total for key, count in counts.items()}
+
+
+def _max_consecutive_run(values: Sequence[str]) -> int:
+    max_run = 0
+    current_value: str | None = None
+    current_run = 0
+    for value in values:
+        if value == current_value:
+            current_run += 1
+        else:
+            current_value = value
+            current_run = 1
+        max_run = max(max_run, current_run)
+    return max_run
+
+
+def _max_index(values: Sequence[float]) -> int:
+    if not values:
+        raise LiveLearnerError("cannot choose max index from empty values")
+    best_index = 0
+    best_value = values[0]
+    for index, value in enumerate(values[1:], start=1):
+        if value > best_value:
+            best_index = index
+            best_value = value
+    return best_index
+
+
+def _expand_dqn_n_step_transitions(
+    transitions: Sequence[DQNTransition],
+    *,
+    config: DQNConfig,
+) -> list[DQNTransition]:
+    if not transitions:
+        return []
+    expanded: list[DQNTransition] = []
+    for start_index, start_transition in enumerate(transitions):
+        reward = 0.0
+        reward_discount = 1.0
+        end_index = start_index
+        for offset in range(config.n_step_return):
+            current_index = start_index + offset
+            if current_index >= len(transitions):
+                break
+            current = transitions[current_index]
+            reward += reward_discount * current.reward
+            end_index = current_index
+            if current.done:
+                break
+            reward_discount *= config.gamma
+
+        end_transition = transitions[end_index]
+        bootstrap_steps = end_index - start_index + 1
+        expanded.append(
+            DQNTransition(
+                features=start_transition.features,
+                action_index=start_transition.action_index,
+                reward=reward,
+                next_features=end_transition.next_features,
+                done=end_transition.done,
+                terminated=end_transition.terminated,
+                truncated=end_transition.truncated,
+                aborted=end_transition.aborted,
+                discount=config.gamma**bootstrap_steps,
+            )
+        )
+    return expanded
+
+
+def _attempt_result_float_values(
+    attempts: Sequence[DQNEvaluationAttemptSummary],
+    key: str,
+) -> list[float]:
+    values: list[float] = []
+    for attempt in attempts:
+        value = attempt.attempt_result.get(key)
+        if value is None:
+            continue
+        values.append(float(value))
+    return values
+
+
 def _linear_epsilon(config: DQNConfig, global_step: int) -> float:
     if config.deterministic_actions:
         return 0.0
@@ -1834,6 +2417,14 @@ def _optimize_dqn(
         dtype=torch.float32,
         device=policy.device,
     )
+    discount_tensor = torch.tensor(
+        [
+            config.gamma if transition.discount is None else transition.discount
+            for transition in batch
+        ],
+        dtype=torch.float32,
+        device=policy.device,
+    )
     next_feature_tensor = torch.tensor(
         [transition.next_features for transition in batch],
         dtype=torch.float32,
@@ -1847,8 +2438,18 @@ def _optimize_dqn(
 
     predicted_q = policy.q_network(feature_tensor).gather(1, action_tensor).squeeze(1)
     with torch.no_grad():
-        next_q = policy.target_network(next_feature_tensor).max(dim=1).values
-        target_q = reward_tensor + config.gamma * (1.0 - terminated_tensor) * next_q
+        if config.double_dqn:
+            next_action_tensor = policy.q_network(next_feature_tensor).argmax(
+                dim=1,
+                keepdim=True,
+            )
+            next_q = policy.target_network(next_feature_tensor).gather(
+                1,
+                next_action_tensor,
+            ).squeeze(1)
+        else:
+            next_q = policy.target_network(next_feature_tensor).max(dim=1).values
+        target_q = reward_tensor + discount_tensor * (1.0 - terminated_tensor) * next_q
 
     loss_tensor = torch.nn.functional.smooth_l1_loss(predicted_q, target_q)
     optimizer.zero_grad(set_to_none=True)

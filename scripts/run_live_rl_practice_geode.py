@@ -17,6 +17,7 @@ from gd_env import GeometryDashClient
 from gd_rl import (
     ActorCriticConfig,
     DQNConfig,
+    DQNEvaluationRunSummary,
     LiveLearnerError,
     LiveObservationEncoderConfig,
     LivePracticeEnv,
@@ -71,6 +72,11 @@ def main(
         help="write the final neural policy checkpoint after training",
     )
     parser.add_argument(
+        "--best-checkpoint-path",
+        type=Path,
+        help="write the best DQN checkpoint whenever greedy evaluation improves",
+    )
+    parser.add_argument(
         "--load-checkpoint",
         type=Path,
         help="load a compatible neural policy checkpoint before training",
@@ -105,6 +111,7 @@ def main(
     parser.add_argument("--encoder-y-scale", type=float, default=500.0)
     parser.add_argument("--encoder-velocity-scale", type=float, default=20.0)
     parser.add_argument("--encoder-rotation-scale", type=float, default=360.0)
+    parser.add_argument("--encoder-pending-event-scale", type=float, default=4.0)
 
     parser.add_argument(
         "--algorithm",
@@ -127,16 +134,66 @@ def main(
     parser.add_argument("--deterministic-actions", action="store_true")
     parser.add_argument("--learner-seed", type=int, default=0)
     parser.add_argument("--history-length", type=int, default=4)
+    parser.add_argument(
+        "--decision-stride",
+        type=int,
+        default=1,
+        help=(
+            "live env ticks to hold each policy decision; use 4 to make "
+            "gamma/history operate on roughly 60 Hz decisions at 240 FPS"
+        ),
+    )
     parser.add_argument("--death-local-window", type=int, default=24)
     parser.add_argument("--death-local-penalty", type=float, default=1.0)
     parser.add_argument("--input-rate-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--repeat-action-penalty",
+        type=float,
+        default=0.0,
+        help=(
+            "DQN-only training penalty once a desired idle/hold run exceeds "
+            "the free window"
+        ),
+    )
+    parser.add_argument(
+        "--repeat-action-penalty-free-decisions",
+        type=int,
+        default=0,
+        help="number of repeated desired idle/hold decisions allowed before penalty",
+    )
     parser.add_argument("--epsilon-start", type=float, default=0.20)
     parser.add_argument("--epsilon-end", type=float, default=0.05)
     parser.add_argument("--epsilon-decay-steps", type=int, default=1000)
+    parser.add_argument(
+        "--eval-attempts",
+        type=int,
+        default=0,
+        help="deterministic greedy DQN attempts per evaluation block",
+    )
+    parser.add_argument(
+        "--eval-interval-attempts",
+        type=int,
+        default=0,
+        help=(
+            "run greedy DQN evaluation every N training attempts; when "
+            "--eval-attempts is positive, a final evaluation always runs"
+        ),
+    )
     parser.add_argument("--dqn-batch-size", type=int, default=32)
     parser.add_argument("--dqn-replay-capacity", type=int, default=2048)
     parser.add_argument("--dqn-warmup-steps", type=int, default=32)
     parser.add_argument("--dqn-target-update-interval", type=int, default=100)
+    parser.add_argument(
+        "--n-step-return",
+        type=int,
+        default=1,
+        help="DQN n-step return horizon in policy decisions",
+    )
+    parser.add_argument(
+        "--no-double-dqn",
+        action="store_true",
+        help="disable Double DQN target selection",
+    )
     parser.add_argument(
         "--min-dwell-ticks",
         type=int,
@@ -183,6 +240,8 @@ def main(
     bridge_client_factory = client_factory or _build_client_factory(args)
 
     summary_path = output_dir / "training_summary.json"
+    best_evaluation_score: tuple[float, float, float, float] | None = None
+    best_evaluation_payload: dict[str, object] | None = None
     try:
         with LivePracticeEnv(
             config=env_config,
@@ -204,11 +263,39 @@ def main(
                     history_length=dqn_config.history_length,
                 )
                 _load_policy_checkpoint(policy, args.load_checkpoint)
+                def on_evaluation(
+                    evaluation: DQNEvaluationRunSummary,
+                ) -> None:
+                    nonlocal best_evaluation_score, best_evaluation_payload
+                    score = _dqn_evaluation_score(evaluation)
+                    if (
+                        best_evaluation_score is not None
+                        and score <= best_evaluation_score
+                    ):
+                        return
+                    best_evaluation_score = score
+                    best_evaluation_payload = evaluation.to_dict()
+                    if args.best_checkpoint_path is None:
+                        return
+                    _save_policy_checkpoint(
+                        policy,
+                        args.best_checkpoint_path,
+                        algorithm=args.algorithm,
+                        policy_config=policy_config,
+                        summary_path=summary_path,
+                        extra_metadata={
+                            "checkpoint_role": "best_greedy_evaluation",
+                            "evaluation": best_evaluation_payload,
+                            "score": list(score),
+                        },
+                    )
+
                 summary = run_dqn_training(
                     env,
                     policy,
                     config=dqn_config,
                     summary_path=summary_path,
+                    evaluation_callback=on_evaluation,
                 )
             else:
                 policy = TinyLiveActorCriticNetwork.from_encoder_config(
@@ -243,6 +330,10 @@ def main(
         "output_dir": str(output_dir),
         "training_summary_json": str(summary_path),
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+        "best_checkpoint_path": (
+            str(args.best_checkpoint_path) if args.best_checkpoint_path else None
+        ),
+        "best_evaluation": best_evaluation_payload,
         "summary": summary.to_dict(),
     }
     if args.compact_output:
@@ -273,6 +364,29 @@ def _validate_args(
         parser.error("--observation-buffer-size must be positive")
     if args.history_length < 0:
         parser.error("--history-length must be non-negative")
+    if args.decision_stride <= 0:
+        parser.error("--decision-stride must be positive")
+    if args.eval_attempts < 0:
+        parser.error("--eval-attempts must be non-negative")
+    if args.eval_interval_attempts < 0:
+        parser.error("--eval-interval-attempts must be non-negative")
+    if args.n_step_return <= 0:
+        parser.error("--n-step-return must be positive")
+    if args.repeat_action_penalty < 0.0:
+        parser.error("--repeat-action-penalty must be non-negative")
+    if args.repeat_action_penalty_free_decisions < 0:
+        parser.error("--repeat-action-penalty-free-decisions must be non-negative")
+    if (
+        args.algorithm != "dqn"
+        and (
+            args.eval_attempts > 0
+            or args.eval_interval_attempts > 0
+            or args.best_checkpoint_path is not None
+        )
+    ):
+        parser.error("greedy evaluation options currently require --algorithm dqn")
+    if args.best_checkpoint_path is not None and args.eval_attempts <= 0:
+        parser.error("--best-checkpoint-path requires --eval-attempts")
     if args.death_local_window < 0:
         parser.error("--death-local-window must be non-negative")
     if args.min_dwell_ticks < 0:
@@ -321,6 +435,7 @@ def _build_policy_config(args: argparse.Namespace) -> NeuralPolicyConfig:
         y_scale=args.encoder_y_scale,
         velocity_scale=args.encoder_velocity_scale,
         rotation_scale=args.encoder_rotation_scale,
+        pending_event_scale=args.encoder_pending_event_scale,
     )
     return NeuralPolicyConfig(
         hidden_size=args.hidden_size,
@@ -341,6 +456,7 @@ def _build_reinforce_config(args: argparse.Namespace) -> ReinforceConfig:
         deterministic_actions=args.deterministic_actions,
         seed=args.learner_seed,
         min_dwell_ticks=args.min_dwell_ticks,
+        decision_stride=args.decision_stride,
     )
 
 
@@ -360,6 +476,7 @@ def _build_actor_critic_config(args: argparse.Namespace) -> ActorCriticConfig:
         death_local_penalty=args.death_local_penalty,
         input_rate_penalty=args.input_rate_penalty,
         min_dwell_ticks=args.min_dwell_ticks,
+        decision_stride=args.decision_stride,
     )
 
 
@@ -375,12 +492,21 @@ def _build_dqn_config(args: argparse.Namespace) -> DQNConfig:
         replay_capacity=args.dqn_replay_capacity,
         warmup_steps=args.dqn_warmup_steps,
         target_update_interval=args.dqn_target_update_interval,
+        double_dqn=not args.no_double_dqn,
+        n_step_return=args.n_step_return,
         max_grad_norm=None if args.no_grad_clip else args.max_grad_norm,
         deterministic_actions=args.deterministic_actions,
         seed=args.learner_seed,
         history_length=args.history_length,
         input_rate_penalty=args.input_rate_penalty,
+        repeat_action_penalty=args.repeat_action_penalty,
+        repeat_action_penalty_free_decisions=(
+            args.repeat_action_penalty_free_decisions
+        ),
         min_dwell_ticks=args.min_dwell_ticks,
+        decision_stride=args.decision_stride,
+        eval_attempts=args.eval_attempts,
+        eval_interval_attempts=args.eval_interval_attempts,
     )
 
 
@@ -390,6 +516,17 @@ def _learner_name(algorithm: str) -> str:
     if algorithm == "dqn":
         return "tiny_dqn"
     return "tiny_reinforce"
+
+
+def _dqn_evaluation_score(
+    evaluation: DQNEvaluationRunSummary,
+) -> tuple[float, float, float, float]:
+    return (
+        float(evaluation.clear_count),
+        evaluation.mean_best_percent,
+        evaluation.best_percent_overall,
+        evaluation.mean_total_step_reward,
+    )
 
 
 def _compact_training_payload(payload: dict[str, object]) -> dict[str, object]:
@@ -414,8 +551,12 @@ def _compact_training_payload(payload: dict[str, object]) -> dict[str, object]:
                     "best_percent": result.get("best_percent"),
                     "total_reward": result.get("total_reward"),
                     "step_count": attempt.get("step_count"),
+                    "decision_count": attempt.get("decision_count"),
                     "action_counts": attempt.get("action_counts"),
+                    "greedy_action_counts": attempt.get("greedy_action_counts"),
                     "intent_counts": attempt.get("intent_counts"),
+                    "q_margin_stats": attempt.get("q_margin_stats"),
+                    "action_diagnostics": attempt.get("action_diagnostics"),
                     "executed_event_count": result.get("executed_event_count"),
                     "dropped_event_count": result.get("dropped_event_count"),
                     "update_count": attempt.get("update_count"),
@@ -436,15 +577,75 @@ def _compact_training_payload(payload: dict[str, object]) -> dict[str, object]:
     clear_count = sum(
         1 for attempt in compact_attempts if bool(attempt.get("cleared"))
     )
+    compact_evaluation_runs = _compact_evaluation_runs(
+        summary.get("evaluation_runs", [])
+    )
     return {
         "output_dir": payload["output_dir"],
         "training_summary_json": payload["training_summary_json"],
         "checkpoint_path": payload.get("checkpoint_path"),
+        "best_checkpoint_path": payload.get("best_checkpoint_path"),
+        "best_evaluation": _compact_evaluation_run(payload.get("best_evaluation")),
         "attempt_count": summary.get("attempt_count"),
         "clear_count": clear_count,
         "best_percent_overall": (
             max(best_percent_values) if best_percent_values else None
         ),
+        "attempts": compact_attempts,
+        "evaluation_runs": compact_evaluation_runs,
+    }
+
+
+def _compact_evaluation_runs(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        compact
+        for evaluation in value
+        if (compact := _compact_evaluation_run(evaluation)) is not None
+    ]
+
+
+def _compact_evaluation_run(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    attempts = value.get("attempts", [])
+    compact_attempts: list[dict[str, object]] = []
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            result = attempt.get("attempt_result", {})
+            if not isinstance(result, dict):
+                result = {}
+            compact_attempts.append(
+                {
+                    "eval_index": attempt.get("eval_index"),
+                    "attempt": attempt.get("attempt_index"),
+                    "cleared": result.get("cleared"),
+                    "death_tick": result.get("death_tick"),
+                    "final_percent": result.get("final_percent"),
+                    "best_percent": result.get("best_percent"),
+                    "total_reward": result.get("total_reward"),
+                    "step_count": attempt.get("step_count"),
+                    "decision_count": attempt.get("decision_count"),
+                    "action_counts": attempt.get("action_counts"),
+                    "greedy_action_counts": attempt.get("greedy_action_counts"),
+                    "intent_counts": attempt.get("intent_counts"),
+                    "q_margin_stats": attempt.get("q_margin_stats"),
+                    "action_diagnostics": attempt.get("action_diagnostics"),
+                    "executed_event_count": result.get("executed_event_count"),
+                    "dropped_event_count": result.get("dropped_event_count"),
+                }
+            )
+    return {
+        "after_attempt_index": value.get("after_attempt_index"),
+        "eval_attempt_count": value.get("eval_attempt_count"),
+        "clear_count": value.get("clear_count"),
+        "clear_rate": value.get("clear_rate"),
+        "best_percent_overall": value.get("best_percent_overall"),
+        "mean_best_percent": value.get("mean_best_percent"),
+        "mean_total_step_reward": value.get("mean_total_step_reward"),
         "attempts": compact_attempts,
     }
 
@@ -456,6 +657,7 @@ def _save_policy_checkpoint(
     algorithm: str,
     policy_config: NeuralPolicyConfig,
     summary_path: Path,
+    extra_metadata: dict[str, object] | None = None,
 ) -> None:
     torch = getattr(policy, "torch")
     checkpoint = {
@@ -470,10 +672,13 @@ def _save_policy_checkpoint(
                 "y_scale": policy_config.encoder.y_scale,
                 "velocity_scale": policy_config.encoder.velocity_scale,
                 "rotation_scale": policy_config.encoder.rotation_scale,
+                "pending_event_scale": policy_config.encoder.pending_event_scale,
             },
         },
         "summary_path": str(summary_path),
     }
+    if extra_metadata is not None:
+        checkpoint["metadata"] = extra_metadata
     if hasattr(policy, "q_network"):
         checkpoint["q_network"] = policy.q_network.state_dict()
         checkpoint["target_network"] = policy.target_network.state_dict()

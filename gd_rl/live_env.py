@@ -57,6 +57,7 @@ class LivePracticeObservation:
 
     latest: BridgeObservation
     policy_observation: BridgeObservation | None
+    pending_event_count: int = 0
 
     @property
     def tick(self) -> int:
@@ -78,6 +79,7 @@ class LivePracticeObservation:
                 if self.policy_observation is not None
                 else None
             ),
+            "pending_event_count": self.pending_event_count,
         }
 
 
@@ -617,6 +619,7 @@ class LivePracticeEnv:
         return LivePracticeObservation(
             latest=observation,
             policy_observation=human.delayed_observation(observation.tick),
+            pending_event_count=human.pending_count,
         )
 
     def _event_from_intent(

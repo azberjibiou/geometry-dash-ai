@@ -47,6 +47,7 @@ def args(**overrides: object) -> argparse.Namespace:
         "encoder_y_scale": 500.0,
         "encoder_velocity_scale": 20.0,
         "encoder_rotation_scale": 360.0,
+        "encoder_pending_event_scale": 4.0,
         "learning_rate": 1e-3,
         "gamma": 0.99,
         "entropy_bonus": 0.0,
@@ -67,16 +68,23 @@ def args(**overrides: object) -> argparse.Namespace:
         "value_loss_weight": 0.5,
         "normalize_advantages": False,
         "history_length": 4,
+        "decision_stride": 1,
         "death_local_window": 24,
         "death_local_penalty": 1.0,
         "input_rate_penalty": 0.0,
+        "repeat_action_penalty": 0.0,
+        "repeat_action_penalty_free_decisions": 0,
         "epsilon_start": 0.20,
         "epsilon_end": 0.05,
         "epsilon_decay_steps": 1000,
+        "eval_attempts": 0,
+        "eval_interval_attempts": 0,
         "dqn_batch_size": 32,
         "dqn_replay_capacity": 2048,
         "dqn_warmup_steps": 32,
         "dqn_target_update_interval": 100,
+        "n_step_return": 1,
+        "no_double_dqn": False,
         "min_dwell_ticks": 4,
     }
     data.update(overrides)
@@ -105,24 +113,34 @@ def test_build_live_rl_configs_keep_smoke_defaults() -> None:
     assert env_config.require_start_x_max == 50.0
     assert policy_config.device == "cpu"
     assert policy_config.encoder.max_tick == namespace.max_steps
+    assert policy_config.encoder.pending_event_scale == 4.0
     assert reinforce_config.attempts == 1
     assert reinforce_config.min_dwell_ticks == 4
+    assert reinforce_config.decision_stride == 1
     assert reinforce_config.max_grad_norm == 1.0
     assert _build_reinforce_config(args(no_grad_clip=True)).max_grad_norm is None
     assert actor_critic_config.attempts == 1
     assert actor_critic_config.history_length == 4
     assert actor_critic_config.death_local_window == 24
     assert actor_critic_config.min_dwell_ticks == 4
+    assert actor_critic_config.decision_stride == 1
     assert actor_critic_config.max_grad_norm == 1.0
     assert _build_actor_critic_config(args(no_grad_clip=True)).max_grad_norm is None
     assert dqn_config.attempts == 1
     assert dqn_config.history_length == 4
     assert dqn_config.epsilon_start == 0.20
     assert dqn_config.epsilon_end == 0.05
+    assert dqn_config.eval_attempts == 0
+    assert dqn_config.eval_interval_attempts == 0
     assert dqn_config.batch_size == 32
     assert dqn_config.replay_capacity == 2048
     assert dqn_config.warmup_steps == 32
+    assert dqn_config.double_dqn is True
+    assert dqn_config.n_step_return == 1
+    assert dqn_config.repeat_action_penalty == 0.0
+    assert dqn_config.repeat_action_penalty_free_decisions == 0
     assert dqn_config.min_dwell_ticks == 4
+    assert dqn_config.decision_stride == 1
     assert dqn_config.max_grad_norm == 1.0
     assert _build_dqn_config(args(no_grad_clip=True)).max_grad_norm is None
 
@@ -183,6 +201,7 @@ def test_live_rl_cli_runs_dqn_with_fake_client_and_writes_summary(
     pytest.importorskip("torch")
     fake_client = OneStepTerminalClient()
     output_dir = tmp_path / "live_dqn_smoke"
+    best_checkpoint_path = tmp_path / "best_dqn.pt"
 
     exit_code = main(
         [
@@ -206,6 +225,12 @@ def test_live_rl_cli_runs_dqn_with_fake_client_and_writes_summary(
             "1",
             "--dqn-warmup-steps",
             "1",
+            "--eval-attempts",
+            "2",
+            "--eval-interval-attempts",
+            "1",
+            "--best-checkpoint-path",
+            str(best_checkpoint_path),
         ],
         client_factory=lambda: fake_client,
     )
@@ -220,10 +245,14 @@ def test_live_rl_cli_runs_dqn_with_fake_client_and_writes_summary(
 
     assert exit_code == 0
     assert stdout["training_summary_json"] == str(output_dir / "training_summary.json")
+    assert stdout["best_checkpoint_path"] == str(best_checkpoint_path)
+    assert stdout["best_evaluation"]["clear_count"] == 2
+    assert best_checkpoint_path.exists()
     assert training_summary["attempt_count"] == 1
     assert training_summary["config"]["algorithm"] == "tiny_dqn"
     assert training_summary["config"]["policy"]["history_length"] == 4
     assert training_summary["attempts"][0]["update_count"] == 1
+    assert training_summary["evaluation_runs"][0]["clear_count"] == 2
     assert attempt_summary["metadata"]["config"]["metadata"]["learner"] == "tiny_dqn"
     assert attempt_summary["cleared"] is True
 
