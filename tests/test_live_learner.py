@@ -364,9 +364,72 @@ def test_dqn_training_updates_hold_q_value_and_writes_summary(
     assert summary.attempts[0].action_counts["hold"] == 1
     assert summary.attempts[0].intent_counts["press"] == 1
     assert summary.attempts[0].update_count == 1
+    assert summary.attempts[0].replay_appended_count == 1
+    assert summary.attempts[0].replay_skipped is False
+    assert summary.attempts[0].replay_skip_reason is None
     assert summary.attempts[0].attempt_result["cleared"] is True
     assert written_summary["config"]["algorithm"] == "tiny_dqn"
     assert written_summary["config"]["policy"]["history_length"] == 1
+
+
+def test_dqn_training_skips_tick_rewind_reset_attempts(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    fake_client = OneStepTickRewindClient()
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="tick_rewind_artifact",
+            output_dir=tmp_path / "attempts",
+            max_steps=4,
+            action_horizon_ticks=0,
+            success_percent=100.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+    policy = TinyLiveDQNNetwork.from_encoder_config(
+        NeuralPolicyConfig(hidden_size=4, seed=17),
+        history_length=1,
+    )
+    _bias_dqn_toward_hold(torch, policy)
+    observation = LivePracticeObservation(
+        latest=_observation(0, percent=0.0),
+        policy_observation=_observation(0, percent=0.0),
+    )
+    before_hold_q = policy.q_values(observation)[1]
+
+    with env:
+        summary = run_dqn_training(
+            env,
+            policy,
+            config=DQNConfig(
+                attempts=1,
+                learning_rate=0.05,
+                deterministic_actions=True,
+                history_length=1,
+                batch_size=1,
+                replay_capacity=4,
+                warmup_steps=1,
+            ),
+            summary_path=tmp_path / "dqn_rewind_summary.json",
+        )
+
+    after_hold_q = policy.q_values(observation)[1]
+    written_summary = json.loads(
+        (tmp_path / "dqn_rewind_summary.json").read_text(encoding="utf-8")
+    )
+
+    attempt = summary.attempts[0]
+    assert attempt.step_count == 1
+    assert attempt.update_count == 0
+    assert attempt.replay_size == 0
+    assert attempt.replay_appended_count == 0
+    assert attempt.replay_skipped is True
+    assert attempt.replay_skip_reason == "death_reason:tick_rewind_reset"
+    assert attempt.attempt_result["death_tick"] == 0
+    assert after_hold_q == pytest.approx(before_hold_q)
+    assert written_summary["attempts"][0]["replay_skipped"] is True
 
 
 class OneStepPressRewardClient:
@@ -428,6 +491,20 @@ class OneStepDeathClient(OneStepPressRewardClient):
             1,
             percent=0.0,
             dead=True,
+            input_down=any(event.kind == "press" for event in self.sent_events),
+        )
+
+
+class OneStepTickRewindClient(OneStepPressRewardClient):
+    def receive_observation(
+        self,
+        *,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> BridgeObservation:
+        return _observation(
+            0,
+            percent=0.0,
+            dead=False,
             input_down=any(event.kind == "press" for event in self.sent_events),
         )
 

@@ -172,6 +172,7 @@ class DQNConfig:
     history_length: int = 4
     input_rate_penalty: float = 0.0
     min_dwell_ticks: int = 4
+    skip_replay_death_reasons: tuple[str, ...] = ("tick_rewind_reset",)
 
     def __post_init__(self) -> None:
         if self.attempts <= 0:
@@ -204,6 +205,8 @@ class DQNConfig:
             raise LiveLearnerError("input_rate_penalty must be non-negative")
         if self.min_dwell_ticks < 0:
             raise LiveLearnerError("min_dwell_ticks must be non-negative")
+        if any(not reason for reason in self.skip_replay_death_reasons):
+            raise LiveLearnerError("skip_replay_death_reasons cannot contain empty values")
 
 
 @dataclass(slots=True)
@@ -521,6 +524,9 @@ class DQNAttemptSummary:
     last_loss: float | None
     update_count: int
     replay_size: int
+    replay_appended_count: int
+    replay_skipped: bool
+    replay_skip_reason: str | None
     epsilon_start: float
     epsilon_end: float
     q_value_stats: dict[str, float]
@@ -1394,19 +1400,23 @@ def run_dqn_attempt(
     effective_action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
     dwell_blocked_count = 0
     intent_counts = {kind: 0 for kind in ACTION_KINDS}
+    pending_transitions: list[DQNTransition] = []
     intent_adapter = ButtonStateIntentAdapter(
         min_dwell_ticks=effective_config.min_dwell_ticks
     )
     intent_adapter.reset(observation)
     history = LiveActionHistory(length=effective_config.history_length)
-    global_step = global_step_start
     update_count = 0
+    replay_appended_count = 0
     epsilon_first: float | None = None
     epsilon_last = 0.0
     last_step: LiveStepResult | None = None
 
     while True:
-        epsilon = _linear_epsilon(effective_config, global_step)
+        epsilon = _linear_epsilon(
+            effective_config,
+            global_step_start + len(pending_transitions),
+        )
         if epsilon_first is None:
             epsilon_first = epsilon
         epsilon_last = epsilon
@@ -1445,7 +1455,7 @@ def run_dqn_attempt(
             history_length=effective_config.history_length,
             config=policy.config.encoder,
         )
-        replay_buffer.append(
+        pending_transitions.append(
             DQNTransition(
                 features=decision.features,
                 action_index=decision.action_index,
@@ -1454,25 +1464,34 @@ def run_dqn_attempt(
                 done=last_step.done,
             )
         )
-        global_step += 1
-
-        loss = _optimize_dqn(
-            policy,
-            optimizer,
-            replay_buffer,
-            config=effective_config,
-        )
-        if loss is not None:
-            losses.append(loss)
-            update_count += 1
-        if global_step % effective_config.target_update_interval == 0:
-            policy.sync_target()
 
         observation = last_step.observation
         if last_step.done:
             break
 
     attempt_result = _attempt_result_from_last_step(env, last_step)
+    replay_skip_reason = _dqn_replay_skip_reason(
+        last_step,
+        config=effective_config,
+    )
+    if replay_skip_reason is None:
+        committed_step = global_step_start
+        for transition in pending_transitions:
+            replay_buffer.append(transition)
+            replay_appended_count += 1
+            committed_step += 1
+            loss = _optimize_dqn(
+                policy,
+                optimizer,
+                replay_buffer,
+                config=effective_config,
+            )
+            if loss is not None:
+                losses.append(loss)
+                update_count += 1
+            if committed_step % effective_config.target_update_interval == 0:
+                policy.sync_target()
+
     return DQNAttemptSummary(
         attempt_index=attempt_index,
         step_count=len(step_rewards),
@@ -1482,6 +1501,9 @@ def run_dqn_attempt(
         last_loss=losses[-1] if losses else None,
         update_count=update_count,
         replay_size=len(replay_buffer),
+        replay_appended_count=replay_appended_count,
+        replay_skipped=replay_skip_reason is not None,
+        replay_skip_reason=replay_skip_reason,
         epsilon_start=epsilon_first if epsilon_first is not None else 0.0,
         epsilon_end=epsilon_last,
         q_value_stats=_float_stats(selected_q_values),
@@ -1522,7 +1544,7 @@ def run_dqn_training(
             global_step_start=global_step,
         )
         attempts.append(attempt)
-        global_step += attempt.step_count
+        global_step += attempt.replay_appended_count
 
     summary = DQNTrainingSummary(
         attempts=attempts,
@@ -1559,6 +1581,19 @@ def _attempt_result_from_last_step(
     ):
         return dict(last_step.info["attempt_result"])
     return env.save_attempt().to_dict()
+
+
+def _dqn_replay_skip_reason(
+    last_step: LiveStepResult | None,
+    *,
+    config: DQNConfig,
+) -> str | None:
+    if last_step is None:
+        return None
+    death_reason = last_step.observation.latest.death_reason
+    if death_reason in config.skip_replay_death_reasons:
+        return f"death_reason:{death_reason}"
+    return None
 
 
 def _trajectory_step_summary(
