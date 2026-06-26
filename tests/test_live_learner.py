@@ -73,6 +73,32 @@ def test_button_state_adapter_uses_intended_state_not_executed_state() -> None:
     assert adapter.intent_for_desired_state("idle", tick=103).kind == "no_op"
 
 
+def test_button_state_adapter_enforces_minimum_dwell_ticks() -> None:
+    adapter = ButtonStateIntentAdapter(min_dwell_ticks=4)
+    adapter.reset(
+        LivePracticeObservation(
+            latest=_observation(0, percent=0.0, input_down=False),
+            policy_observation=_observation(0, percent=0.0, input_down=False),
+        )
+    )
+
+    assert adapter.intent_for_desired_state("hold", tick=10) == IntendedAction.press(
+        10
+    )
+    assert adapter.effective_input_state == "hold"
+    assert adapter.intent_for_desired_state("idle", tick=11).kind == "no_op"
+    assert adapter.effective_input_state == "hold"
+    assert adapter.intent_for_desired_state("idle", tick=13).kind == "no_op"
+    assert adapter.intent_for_desired_state("idle", tick=14) == IntendedAction.release(
+        14
+    )
+    assert adapter.effective_input_state == "idle"
+    assert adapter.intent_for_desired_state("hold", tick=17).kind == "no_op"
+    assert adapter.intent_for_desired_state("hold", tick=18) == IntendedAction.press(
+        18
+    )
+
+
 def test_actor_critic_encoder_appends_recent_intended_history() -> None:
     observation = LivePracticeObservation(
         latest=_observation(20, percent=80.0, x=200.0),
@@ -286,7 +312,11 @@ class OneStepPressRewardClient:
             )
         return _observation(0, percent=0.0)
 
-    def receive_observation(self) -> BridgeObservation:
+    def receive_observation(
+        self,
+        *,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> BridgeObservation:
         pressed = any(event.kind == "press" for event in self.sent_events)
         return _observation(
             1,
@@ -301,7 +331,11 @@ class OneStepPressRewardClient:
 
 
 class OneStepDeathClient(OneStepPressRewardClient):
-    def receive_observation(self) -> BridgeObservation:
+    def receive_observation(
+        self,
+        *,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> BridgeObservation:
         return _observation(
             1,
             percent=0.0,

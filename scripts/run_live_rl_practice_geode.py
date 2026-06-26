@@ -112,6 +112,15 @@ def main(
     parser.add_argument("--death-local-window", type=int, default=24)
     parser.add_argument("--death-local-penalty", type=float, default=1.0)
     parser.add_argument("--input-rate-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--min-dwell-ticks",
+        type=int,
+        default=4,
+        help=(
+            "minimum ticks to keep an idle/hold state before allowing the "
+            "opposite edge; 4 matches the PickleGawd-style step repeat"
+        ),
+    )
 
     parser.add_argument("--progress-scale", type=float, default=1.0)
     parser.add_argument("--best-progress-bonus-scale", type=float, default=0.5)
@@ -218,6 +227,8 @@ def _validate_args(
         parser.error("--history-length must be non-negative")
     if args.death_local_window < 0:
         parser.error("--death-local-window must be non-negative")
+    if args.min_dwell_ticks < 0:
+        parser.error("--min-dwell-ticks must be non-negative")
 
 
 def _build_env_config(
@@ -285,6 +296,7 @@ def _build_reinforce_config(args: argparse.Namespace) -> ReinforceConfig:
         normalize_returns=args.normalize_returns,
         deterministic_actions=args.deterministic_actions,
         seed=args.learner_seed,
+        min_dwell_ticks=args.min_dwell_ticks,
     )
 
 
@@ -303,6 +315,7 @@ def _build_actor_critic_config(args: argparse.Namespace) -> ActorCriticConfig:
         death_local_window=args.death_local_window,
         death_local_penalty=args.death_local_penalty,
         input_rate_penalty=args.input_rate_penalty,
+        min_dwell_ticks=args.min_dwell_ticks,
     )
 
 

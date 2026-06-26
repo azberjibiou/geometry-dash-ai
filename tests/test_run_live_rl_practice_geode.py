@@ -69,6 +69,7 @@ def args(**overrides: object) -> argparse.Namespace:
         "death_local_window": 24,
         "death_local_penalty": 1.0,
         "input_rate_penalty": 0.0,
+        "min_dwell_ticks": 4,
     }
     data.update(overrides)
     return argparse.Namespace(**data)
@@ -96,11 +97,13 @@ def test_build_live_rl_configs_keep_smoke_defaults() -> None:
     assert policy_config.device == "cpu"
     assert policy_config.encoder.max_tick == namespace.max_steps
     assert reinforce_config.attempts == 1
+    assert reinforce_config.min_dwell_ticks == 4
     assert reinforce_config.max_grad_norm == 1.0
     assert _build_reinforce_config(args(no_grad_clip=True)).max_grad_norm is None
     assert actor_critic_config.attempts == 1
     assert actor_critic_config.history_length == 4
     assert actor_critic_config.death_local_window == 24
+    assert actor_critic_config.min_dwell_ticks == 4
     assert actor_critic_config.max_grad_norm == 1.0
     assert _build_actor_critic_config(args(no_grad_clip=True)).max_grad_norm is None
 
@@ -187,7 +190,11 @@ class OneStepTerminalClient:
             )
         return _observation(0, percent=0.0)
 
-    def receive_observation(self) -> BridgeObservation:
+    def receive_observation(
+        self,
+        *,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> BridgeObservation:
         return _observation(
             1,
             percent=100.0,

@@ -55,6 +55,8 @@ struct BridgeCommand {
     bool down = false;
     bool player2 = false;
     int tick = 0;
+    int receivedTick = -1;
+    int sequence = -1;
     std::string reason;
     std::vector<MacroEvent> macroEvents;
 };
@@ -475,6 +477,8 @@ private:
                 .down = *kind == "press",
                 .player2 = player == "p2",
                 .tick = *tick,
+                .receivedTick = m_currentTick.load(),
+                .sequence = m_nextCommandSequence.fetch_add(1),
             });
             return makeAckMessage("action queued", m_currentTick.load());
         }
@@ -584,6 +588,7 @@ private:
 
     std::mutex m_commandMutex;
     std::vector<BridgeCommand> m_commands;
+    std::atomic<int> m_nextCommandSequence = 0;
 
     std::mutex m_outboundMutex;
     std::condition_variable m_outboundCv;
@@ -720,7 +725,24 @@ void applyBridgeCommands(PlayLayer* layer) {
             continue;
         }
 
+        auto const appliedTick = state.nextObservationTick;
         applyInputEvent(layer, command.down, command.player2);
+        bridgeServer().enqueueObservation(makeDiagnosticMessage(
+            "live_action_applied",
+            appliedTick,
+            matjson::makeObject({
+                { "command_sequence", command.sequence },
+                { "requested_tick", command.tick },
+                { "received_tick", command.receivedTick },
+                { "applied_tick", appliedTick },
+                { "requested_to_received_lag_ticks", command.receivedTick - command.tick },
+                { "requested_to_applied_lag_ticks", appliedTick - command.tick },
+                { "received_to_applied_lag_ticks", appliedTick - command.receivedTick },
+                { "kind", command.down ? matjson::Value("press") : matjson::Value("release") },
+                { "player", command.player2 ? matjson::Value("p2") : matjson::Value("p1") },
+                { "state_after", command.player2 ? state.p2Down : state.p1Down },
+            })
+        ));
     }
 }
 

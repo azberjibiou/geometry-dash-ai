@@ -35,7 +35,11 @@ class LiveGeodeClientLike(Protocol):
     ) -> BridgeObservation:
         ...
 
-    def receive_observation(self) -> BridgeObservation:
+    def receive_observation(
+        self,
+        *,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> BridgeObservation:
         ...
 
     def send_event(self, event: Event) -> None:
@@ -300,7 +304,7 @@ class LivePracticeEnv:
             client.send_event(event)
             self._executed_events.append(event)
 
-        next_observation = client.receive_observation()
+        next_observation = client.receive_observation(diagnostics=self._diagnostics)
         if next_observation.tick <= current.tick:
             raise ValueError(
                 "live observations must advance strictly between env steps: "

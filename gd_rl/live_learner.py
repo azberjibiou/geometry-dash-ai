@@ -90,6 +90,7 @@ class ReinforceConfig:
     normalize_returns: bool = False
     deterministic_actions: bool = False
     seed: int = 0
+    min_dwell_ticks: int = 4
 
     def __post_init__(self) -> None:
         if self.attempts <= 0:
@@ -102,6 +103,8 @@ class ReinforceConfig:
             raise LiveLearnerError("entropy_bonus must be non-negative")
         if self.max_grad_norm is not None and self.max_grad_norm <= 0.0:
             raise LiveLearnerError("max_grad_norm must be positive or None")
+        if self.min_dwell_ticks < 0:
+            raise LiveLearnerError("min_dwell_ticks must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +124,7 @@ class ActorCriticConfig:
     death_local_window: int = 24
     death_local_penalty: float = 1.0
     input_rate_penalty: float = 0.0
+    min_dwell_ticks: int = 4
 
     def __post_init__(self) -> None:
         if self.attempts <= 0:
@@ -143,6 +147,8 @@ class ActorCriticConfig:
             raise LiveLearnerError("death_local_penalty must be non-negative")
         if self.input_rate_penalty < 0.0:
             raise LiveLearnerError("input_rate_penalty must be non-negative")
+        if self.min_dwell_ticks < 0:
+            raise LiveLearnerError("min_dwell_ticks must be non-negative")
 
 
 @dataclass(slots=True)
@@ -155,6 +161,12 @@ class ButtonStateIntentAdapter:
     """
 
     intended_input_down: bool = False
+    min_dwell_ticks: int = 0
+    last_transition_tick: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.min_dwell_ticks < 0:
+            raise LiveLearnerError("min_dwell_ticks must be non-negative")
 
     def reset(self, observation: LivePracticeObservation | None = None) -> None:
         """Start a new attempt from the current fresh-reset input state."""
@@ -162,6 +174,7 @@ class ButtonStateIntentAdapter:
         self.intended_input_down = (
             bool(observation.latest.input_down) if observation is not None else False
         )
+        self.last_transition_tick = None
 
     def intent_for_desired_state(
         self,
@@ -172,16 +185,38 @@ class ButtonStateIntentAdapter:
         """Return the edge needed to reach the desired intended state."""
 
         if desired_input_state == "hold":
-            if self.intended_input_down:
-                return IntendedAction.no_op(tick)
-            self.intended_input_down = True
+            target_down = True
+        elif desired_input_state == "idle":
+            target_down = False
+        else:
+            raise LiveLearnerError(
+                f"unknown desired input state {desired_input_state!r}"
+            )
+
+        if target_down == self.intended_input_down:
+            return IntendedAction.no_op(tick)
+        if not self.can_transition(tick):
+            return IntendedAction.no_op(tick)
+
+        self.intended_input_down = target_down
+        self.last_transition_tick = tick
+        if target_down:
             return IntendedAction.press(tick)
-        if desired_input_state == "idle":
-            if not self.intended_input_down:
-                return IntendedAction.no_op(tick)
-            self.intended_input_down = False
-            return IntendedAction.release(tick)
-        raise LiveLearnerError(f"unknown desired input state {desired_input_state!r}")
+        return IntendedAction.release(tick)
+
+    def can_transition(self, tick: int) -> bool:
+        """Return whether the dwell window allows a new input edge."""
+
+        return (
+            self.last_transition_tick is None
+            or tick - self.last_transition_tick >= self.min_dwell_ticks
+        )
+
+    @property
+    def effective_input_state(self) -> DesiredInputState:
+        """Current intended button state after dwell gating."""
+
+        return "hold" if self.intended_input_down else "idle"
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +285,8 @@ class NeuralActionDecision:
     intent: IntendedAction
     action_index: int
     desired_input_state: DesiredInputState
+    effective_input_state: DesiredInputState
+    dwell_blocked: bool
     desired_holding: bool
     probability: float
     logits: list[float]
@@ -262,6 +299,8 @@ class NeuralActionDecision:
             "intent": asdict(self.intent),
             "action_index": self.action_index,
             "desired_input_state": self.desired_input_state,
+            "effective_input_state": self.effective_input_state,
+            "dwell_blocked": self.dwell_blocked,
             "desired_holding": self.desired_holding,
             "probability": self.probability,
             "logits": list(self.logits),
@@ -276,6 +315,8 @@ class ActorCriticActionDecision:
     intent: IntendedAction
     action_index: int
     desired_input_state: DesiredInputState
+    effective_input_state: DesiredInputState
+    dwell_blocked: bool
     desired_holding: bool
     probability: float
     logits: list[float]
@@ -290,6 +331,8 @@ class ActorCriticActionDecision:
             "intent": asdict(self.intent),
             "action_index": self.action_index,
             "desired_input_state": self.desired_input_state,
+            "effective_input_state": self.effective_input_state,
+            "dwell_blocked": self.dwell_blocked,
             "desired_holding": self.desired_holding,
             "probability": self.probability,
             "logits": list(self.logits),
@@ -309,6 +352,8 @@ class ReinforceAttemptSummary:
     policy_loss: float
     entropy: float
     action_counts: dict[str, int]
+    effective_action_counts: dict[str, int]
+    dwell_blocked_count: int
     intent_counts: dict[str, int]
     attempt_result: dict[str, Any]
 
@@ -331,6 +376,8 @@ class ActorCriticAttemptSummary:
     mean_value: float
     advantage_stats: dict[str, float]
     action_counts: dict[str, int]
+    effective_action_counts: dict[str, int]
+    dwell_blocked_count: int
     intent_counts: dict[str, int]
     death_local_stats: dict[str, Any]
     attempt_result: dict[str, Any]
@@ -451,6 +498,7 @@ class TinyLivePolicyNetwork:
             desired_input_state,
             tick=observation.tick,
         )
+        effective_input_state = adapter.effective_input_state
         probability = float(
             self.torch.softmax(logits, dim=-1)[action_index].detach().cpu().item()
         )
@@ -458,6 +506,8 @@ class TinyLivePolicyNetwork:
             intent=intent,
             action_index=action_index,
             desired_input_state=desired_input_state,
+            effective_input_state=effective_input_state,
+            dwell_blocked=effective_input_state != desired_input_state,
             desired_holding=desired_input_state == "hold",
             probability=probability,
             logits=[float(value) for value in logits.detach().cpu().tolist()],
@@ -580,6 +630,7 @@ class TinyLiveActorCriticNetwork:
             desired_input_state,
             tick=observation.tick,
         )
+        effective_input_state = adapter.effective_input_state
         probability = float(
             self.torch.softmax(logits, dim=-1)[action_index].detach().cpu().item()
         )
@@ -587,6 +638,8 @@ class TinyLiveActorCriticNetwork:
             intent=intent,
             action_index=action_index,
             desired_input_state=desired_input_state,
+            effective_input_state=effective_input_state,
+            dwell_blocked=effective_input_state != desired_input_state,
             desired_holding=desired_input_state == "hold",
             probability=probability,
             logits=[float(value) for value in logits.detach().cpu().tolist()],
@@ -700,8 +753,12 @@ def run_reinforce_attempt(
     log_probs: list[Any] = []
     entropies: list[Any] = []
     action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    effective_action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    dwell_blocked_count = 0
     intent_counts = {kind: 0 for kind in ACTION_KINDS}
-    intent_adapter = ButtonStateIntentAdapter()
+    intent_adapter = ButtonStateIntentAdapter(
+        min_dwell_ticks=effective_config.min_dwell_ticks
+    )
     intent_adapter.reset(observation)
     last_step: LiveStepResult | None = None
 
@@ -712,6 +769,9 @@ def run_reinforce_attempt(
             deterministic=effective_config.deterministic_actions,
         )
         action_counts[decision.desired_input_state] += 1
+        effective_action_counts[decision.effective_input_state] += 1
+        if decision.dwell_blocked:
+            dwell_blocked_count += 1
         intent_counts[decision.intent.kind] += 1
         last_step = env.step(decision.intent)
         rewards.append(float(last_step.reward))
@@ -761,6 +821,10 @@ def run_reinforce_attempt(
         policy_loss=float(policy_loss_tensor.detach().cpu().item()),
         entropy=float(entropy_tensor_sum.detach().cpu().item()),
         action_counts={kind: int(count) for kind, count in action_counts.items()},
+        effective_action_counts={
+            kind: int(count) for kind, count in effective_action_counts.items()
+        },
+        dwell_blocked_count=dwell_blocked_count,
         intent_counts={kind: int(count) for kind, count in intent_counts.items()},
         attempt_result=attempt_result,
     )
@@ -828,8 +892,12 @@ def run_actor_critic_attempt(
     values: list[Any] = []
     trajectory_steps: list[dict[str, Any]] = []
     action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    effective_action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    dwell_blocked_count = 0
     intent_counts = {kind: 0 for kind in ACTION_KINDS}
-    intent_adapter = ButtonStateIntentAdapter()
+    intent_adapter = ButtonStateIntentAdapter(
+        min_dwell_ticks=effective_config.min_dwell_ticks
+    )
     intent_adapter.reset(observation)
     history = LiveActionHistory(length=effective_config.history_length)
     last_step: LiveStepResult | None = None
@@ -842,6 +910,9 @@ def run_actor_critic_attempt(
             deterministic=effective_config.deterministic_actions,
         )
         action_counts[decision.desired_input_state] += 1
+        effective_action_counts[decision.effective_input_state] += 1
+        if decision.dwell_blocked:
+            dwell_blocked_count += 1
         intent_counts[decision.intent.kind] += 1
         last_step = env.step(decision.intent)
         base_reward = float(last_step.reward)
@@ -867,7 +938,7 @@ def run_actor_critic_attempt(
             )
         )
         history.append(
-            desired_input_state=decision.desired_input_state,
+            desired_input_state=decision.effective_input_state,
             intent_kind=decision.intent.kind,
         )
         observation = last_step.observation
@@ -935,6 +1006,10 @@ def run_actor_critic_attempt(
         mean_value=float(value_tensor.detach().mean().cpu().item()),
         advantage_stats=_tensor_stats(policy.torch, advantages),
         action_counts={kind: int(count) for kind, count in action_counts.items()},
+        effective_action_counts={
+            kind: int(count) for kind, count in effective_action_counts.items()
+        },
+        dwell_blocked_count=dwell_blocked_count,
         intent_counts={kind: int(count) for kind, count in intent_counts.items()},
         death_local_stats=death_local_stats,
         attempt_result=attempt_result,
@@ -1031,6 +1106,8 @@ def _trajectory_step_summary(
             else None
         ),
         "desired_input_state": decision.desired_input_state,
+        "effective_input_state": decision.effective_input_state,
+        "dwell_blocked": decision.dwell_blocked,
         "intent_kind": decision.intent.kind,
         "value": decision.value,
         "env_reward": env_reward,
@@ -1105,6 +1182,14 @@ def _apply_death_local_feedback(
                 "desired_input_state",
                 DESIRED_INPUT_STATES,
             ),
+            "effective_input_state_counts": _count_recent(
+                recent_steps,
+                "effective_input_state",
+                DESIRED_INPUT_STATES,
+            ),
+            "dwell_blocked_count": sum(
+                1 for step in recent_steps if step.get("dwell_blocked")
+            ),
             "intent_counts": _count_recent(recent_steps, "intent_kind", ACTION_KINDS),
             "average_policy_y": _mean_optional(
                 step["policy_y"] for step in recent_steps
@@ -1149,6 +1234,8 @@ def _compact_recent_steps(steps: Sequence[dict[str, Any]]) -> list[dict[str, Any
         "policy_y_vel",
         "policy_input_down",
         "desired_input_state",
+        "effective_input_state",
+        "dwell_blocked",
         "intent_kind",
         "env_reward",
         "input_rate_penalty",

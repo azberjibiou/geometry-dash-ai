@@ -135,10 +135,14 @@ class GeometryDashClient:
 
         raise TimeoutError("did not receive a fresh tick-0 observation after reset")
 
-    def receive_observation(self) -> BridgeObservation:
+    def receive_observation(
+        self,
+        *,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> BridgeObservation:
         """Read messages until the next observation arrives."""
 
-        return self._receive_observation()
+        return self._receive_observation(diagnostics=diagnostics)
 
     def run_scripted_events(
         self,

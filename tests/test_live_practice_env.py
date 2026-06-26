@@ -46,10 +46,22 @@ class FakeLiveGeodeClient:
             )
         return self.observations[0]
 
-    def receive_observation(self) -> BridgeObservation:
+    def receive_observation(
+        self,
+        *,
+        diagnostics: list[BridgeDiagnostic] | None = None,
+    ) -> BridgeObservation:
         self.index += 1
         if self.index >= len(self.observations):
             raise EOFError("fake observation stream exhausted")
+        if diagnostics is not None and self.sent_events:
+            diagnostics.append(
+                BridgeDiagnostic(
+                    kind="fake_live_action_applied",
+                    tick=self.observations[self.index].tick,
+                    data={"event_count": len(self.sent_events)},
+                )
+            )
         return self.observations[self.index]
 
     def send_event(self, event: Event) -> None:
@@ -103,6 +115,13 @@ def test_live_env_humanizes_intent_before_dispatching_input(tmp_path: Path) -> N
     assert result.intended_event_count == 1
     assert result.executed_event_count == 1
     assert result.trace_path.endswith("trace.jsonl")
+    diagnostics = json.loads(
+        (attempt_dir / "geode_diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert any(
+        diagnostic["kind"] == "fake_live_action_applied"
+        for diagnostic in diagnostics["diagnostics"]
+    )
 
 
 def test_live_env_returns_delayed_policy_observation_and_persists_terminal_attempt(
