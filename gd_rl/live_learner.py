@@ -279,10 +279,12 @@ class ButtonStateIntentAdapter:
 
 @dataclass(frozen=True, slots=True)
 class LiveActionHistoryEntry:
-    """One recent intended decision for compact delay-aware features."""
+    """One recent policy decision and adapter result for compact features."""
 
-    desired_input_state: DesiredInputState
+    selected_desired_state: DesiredInputState
+    commanded_input_state: DesiredInputState
     intent_kind: ActionKind
+    dwell_blocked: bool
 
 
 @dataclass(slots=True)
@@ -302,15 +304,19 @@ class LiveActionHistory:
     def append(
         self,
         *,
-        desired_input_state: DesiredInputState,
+        selected_desired_state: DesiredInputState,
+        commanded_input_state: DesiredInputState,
         intent_kind: ActionKind,
+        dwell_blocked: bool,
     ) -> None:
         if self.length == 0:
             return
         self.entries.append(
             LiveActionHistoryEntry(
-                desired_input_state=desired_input_state,
+                selected_desired_state=selected_desired_state,
+                commanded_input_state=commanded_input_state,
                 intent_kind=intent_kind,
+                dwell_blocked=dwell_blocked,
             )
         )
         if len(self.entries) > self.length:
@@ -328,11 +334,13 @@ class LiveActionHistory:
             if entry is None:
                 features.extend([0.0] * live_action_history_entry_feature_dim())
                 continue
-            features.append(1.0 if entry.desired_input_state == "hold" else 0.0)
+            features.append(1.0 if entry.selected_desired_state == "hold" else 0.0)
+            features.append(1.0 if entry.commanded_input_state == "hold" else 0.0)
             features.extend(
                 1.0 if entry.intent_kind == kind else 0.0
                 for kind in ACTION_KINDS
             )
+            features.append(1.0 if entry.dwell_blocked else 0.0)
         return features
 
 
@@ -1029,7 +1037,7 @@ def encode_actor_critic_observation(
 
 
 def live_action_history_entry_feature_dim() -> int:
-    return 1 + len(ACTION_KINDS)
+    return 3 + len(ACTION_KINDS)
 
 
 def live_action_history_feature_dim(history_length: int) -> int:
@@ -1266,8 +1274,10 @@ def run_actor_critic_attempt(
             )
         )
         history.append(
-            desired_input_state=decision.effective_input_state,
+            selected_desired_state=decision.desired_input_state,
+            commanded_input_state=decision.effective_input_state,
             intent_kind=decision.intent.kind,
+            dwell_blocked=decision.dwell_blocked,
         )
         observation = last_step.observation
         if last_step.done:
@@ -1460,8 +1470,10 @@ def run_dqn_attempt(
         training_rewards.append(step_reward)
 
         history.append(
-            desired_input_state=decision.effective_input_state,
+            selected_desired_state=decision.desired_input_state,
+            commanded_input_state=decision.effective_input_state,
             intent_kind=decision.intent.kind,
+            dwell_blocked=decision.dwell_blocked,
         )
         next_features = encode_dqn_observation(
             last_step.observation,

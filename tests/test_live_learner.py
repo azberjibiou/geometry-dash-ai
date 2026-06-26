@@ -113,7 +113,12 @@ def test_actor_critic_encoder_appends_recent_intended_history() -> None:
         policy_observation=_observation(10, percent=25.0, x=50.0),
     )
     history = LiveActionHistory(length=2)
-    history.append(desired_input_state="hold", intent_kind="press")
+    history.append(
+        selected_desired_state="hold",
+        commanded_input_state="hold",
+        intent_kind="press",
+        dwell_blocked=False,
+    )
 
     features = encode_actor_critic_observation(
         observation,
@@ -127,7 +132,85 @@ def test_actor_critic_encoder_appends_recent_intended_history() -> None:
         observation,
         config=LiveObservationEncoderConfig(max_tick=100, x_scale=100.0),
     )
-    assert features[-8:] == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+    assert features[-12:] == [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+    ]
+
+
+def test_action_history_preserves_dwell_blocked_desired_and_commanded_state() -> None:
+    history = LiveActionHistory(length=1)
+    history.append(
+        selected_desired_state="idle",
+        commanded_input_state="hold",
+        intent_kind="no_op",
+        dwell_blocked=True,
+    )
+
+    assert history.entries[0].selected_desired_state == "idle"
+    assert history.entries[0].commanded_input_state == "hold"
+    assert history.entries[0].dwell_blocked is True
+    assert history.features() == [0.0, 1.0, 1.0, 0.0, 0.0, 1.0]
+
+
+def test_dqn_dwell_blocked_decision_history_keeps_selected_idle() -> None:
+    torch = pytest.importorskip("torch")
+    policy = TinyLiveDQNNetwork.from_encoder_config(
+        NeuralPolicyConfig(hidden_size=4, seed=23),
+        history_length=1,
+    )
+    adapter = ButtonStateIntentAdapter(min_dwell_ticks=4)
+    adapter.reset(
+        LivePracticeObservation(
+            latest=_observation(10, percent=0.0, input_down=False),
+            policy_observation=_observation(10, percent=0.0, input_down=False),
+        )
+    )
+    history = LiveActionHistory(length=1)
+
+    _bias_dqn_toward_hold(torch, policy)
+    first = policy.act(
+        LivePracticeObservation(
+            latest=_observation(10, percent=0.0, input_down=False),
+            policy_observation=_observation(10, percent=0.0, input_down=False),
+        ),
+        intent_adapter=adapter,
+        history=history,
+        deterministic=True,
+    )
+    assert first.intent.kind == "press"
+
+    _bias_dqn_toward_idle(torch, policy)
+    blocked = policy.act(
+        LivePracticeObservation(
+            latest=_observation(11, percent=1.0, input_down=False),
+            policy_observation=_observation(11, percent=1.0, input_down=False),
+        ),
+        intent_adapter=adapter,
+        history=history,
+        deterministic=True,
+    )
+    history.append(
+        selected_desired_state=blocked.desired_input_state,
+        commanded_input_state=blocked.effective_input_state,
+        intent_kind=blocked.intent.kind,
+        dwell_blocked=blocked.dwell_blocked,
+    )
+
+    assert blocked.desired_input_state == "idle"
+    assert blocked.effective_input_state == "hold"
+    assert blocked.dwell_blocked is True
+    assert history.features() == [0.0, 1.0, 1.0, 0.0, 0.0, 1.0]
 
 
 def test_dqn_encoder_uses_same_delay_aware_features() -> None:
@@ -136,7 +219,12 @@ def test_dqn_encoder_uses_same_delay_aware_features() -> None:
         policy_observation=_observation(10, percent=25.0, x=50.0),
     )
     history = LiveActionHistory(length=1)
-    history.append(desired_input_state="hold", intent_kind="press")
+    history.append(
+        selected_desired_state="hold",
+        commanded_input_state="hold",
+        intent_kind="press",
+        dwell_blocked=False,
+    )
 
     features = encode_dqn_observation(
         observation,
@@ -633,6 +721,16 @@ def _bias_dqn_toward_hold(torch, policy: TinyLiveDQNNetwork) -> None:  # type: i
             parameter.zero_()
         policy.q_network[2].bias.copy_(
             torch.tensor([0.0, 1.0], dtype=torch.float32)
+        )
+    policy.sync_target()
+
+
+def _bias_dqn_toward_idle(torch, policy: TinyLiveDQNNetwork) -> None:  # type: ignore[no-untyped-def]
+    with torch.no_grad():
+        for parameter in policy.q_network.parameters():
+            parameter.zero_()
+        policy.q_network[2].bias.copy_(
+            torch.tensor([1.0, 0.0], dtype=torch.float32)
         )
     policy.sync_target()
 
