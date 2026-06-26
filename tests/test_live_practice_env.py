@@ -160,6 +160,10 @@ def test_live_env_returns_delayed_policy_observation_and_persists_terminal_attem
 
         terminal_step = env.step(IntendedAction.no_op(2))
         assert terminal_step.done is True
+        assert terminal_step.terminated is True
+        assert terminal_step.truncated is False
+        assert terminal_step.aborted is False
+        assert terminal_step.info["termination_reason"] == "clear"
         assert terminal_step.info["attempt_result"]["cleared"] is True
 
     attempt_dir = tmp_path / "attempt_001"
@@ -202,6 +206,10 @@ def test_live_env_only_waits_after_clear_not_death(
         death_step = death_env.step(IntendedAction.no_op(0))
 
     assert death_step.done is True
+    assert death_step.terminated is True
+    assert death_step.truncated is False
+    assert death_step.aborted is False
+    assert death_step.info["termination_reason"] == "death"
     assert death_step.info["attempt_result"]["cleared"] is False
     assert sleeps == []
 
@@ -225,8 +233,45 @@ def test_live_env_only_waits_after_clear_not_death(
         clear_step = clear_env.step(IntendedAction.no_op(0))
 
     assert clear_step.done is True
+    assert clear_step.terminated is True
+    assert clear_step.truncated is False
+    assert clear_step.aborted is False
+    assert clear_step.info["termination_reason"] == "clear"
     assert clear_step.info["attempt_result"]["cleared"] is True
     assert sleeps == [5.0]
+
+
+def test_live_env_reports_max_steps_as_truncation(tmp_path: Path) -> None:
+    fake_client = FakeLiveGeodeClient(
+        [
+            _observation(0, percent=0.0),
+            _observation(1, percent=10.0),
+        ]
+    )
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="max_steps_fixture",
+            output_dir=tmp_path,
+            max_steps=1,
+            success_percent=100.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+
+    with env:
+        env.reset(attempt_index=1)
+        step = env.step(IntendedAction.no_op(0))
+
+    assert step.done is True
+    assert step.terminated is False
+    assert step.truncated is True
+    assert step.aborted is False
+    assert step.info["max_steps_reached"] is True
+    assert step.info["truncation_reason"] == "max_steps"
+    assert step.info["termination_reason"] is None
+    assert step.info["attempt_result"]["death_tick"] is None
+    assert step.info["attempt_result"]["cleared"] is False
 
 
 def test_live_env_treats_tick_rewind_as_terminal_death(tmp_path: Path) -> None:
@@ -259,7 +304,14 @@ def test_live_env_treats_tick_rewind_as_terminal_death(tmp_path: Path) -> None:
     )
 
     assert first_step.done is False
+    assert first_step.terminated is False
+    assert first_step.truncated is False
+    assert first_step.aborted is False
     assert rewind_step.done is True
+    assert rewind_step.terminated is False
+    assert rewind_step.truncated is False
+    assert rewind_step.aborted is True
+    assert rewind_step.info["abort_reason"] == "tick_rewind_reset"
     assert rewind_step.observation.latest.tick == 1
     assert rewind_step.observation.latest.dead is True
     assert rewind_step.info["attempt_result"]["death_tick"] == 1

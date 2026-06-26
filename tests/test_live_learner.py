@@ -3,12 +3,15 @@ from pathlib import Path
 
 import pytest
 
+import gd_rl.live_learner as live_learner_module
 from gd_env import BridgeDiagnostic, BridgeObservation
 from gd_human_model import Event, HumanProfile
 from gd_rl import (
     ActorCriticConfig,
     ButtonStateIntentAdapter,
     DQNConfig,
+    DQNReplayBuffer,
+    DQNTransition,
     IntendedAction,
     LiveActionHistory,
     LiveObservationEncoderConfig,
@@ -372,6 +375,89 @@ def test_dqn_training_updates_hold_q_value_and_writes_summary(
     assert written_summary["config"]["policy"]["history_length"] == 1
 
 
+def test_dqn_target_bootstraps_truncated_but_not_terminated_transition() -> None:
+    torch = pytest.importorskip("torch")
+    features = [0.0] * dqn_feature_dim(history_length=0)
+
+    terminal_policy = _zero_dqn_with_target_next_q(torch)
+    terminal_optimizer = terminal_policy.make_optimizer(
+        DQNConfig(
+            batch_size=1,
+            replay_capacity=2,
+            warmup_steps=1,
+            max_grad_norm=None,
+        )
+    )
+    terminal_replay = DQNReplayBuffer(capacity=2)
+    terminal_replay.append(
+        DQNTransition(
+            features=features,
+            action_index=1,
+            reward=0.0,
+            next_features=features,
+            done=True,
+            terminated=True,
+            truncated=False,
+        )
+    )
+
+    terminal_before = _dqn_action_q(torch, terminal_policy, features, action_index=1)
+    terminal_loss = live_learner_module._optimize_dqn(
+        terminal_policy,
+        terminal_optimizer,
+        terminal_replay,
+        config=DQNConfig(
+            batch_size=1,
+            replay_capacity=2,
+            warmup_steps=1,
+            max_grad_norm=None,
+        ),
+    )
+    terminal_after = _dqn_action_q(torch, terminal_policy, features, action_index=1)
+
+    truncated_policy = _zero_dqn_with_target_next_q(torch)
+    truncated_optimizer = truncated_policy.make_optimizer(
+        DQNConfig(
+            batch_size=1,
+            replay_capacity=2,
+            warmup_steps=1,
+            max_grad_norm=None,
+        )
+    )
+    truncated_replay = DQNReplayBuffer(capacity=2)
+    truncated_replay.append(
+        DQNTransition(
+            features=features,
+            action_index=1,
+            reward=0.0,
+            next_features=features,
+            done=True,
+            terminated=False,
+            truncated=True,
+        )
+    )
+
+    truncated_before = _dqn_action_q(torch, truncated_policy, features, action_index=1)
+    truncated_loss = live_learner_module._optimize_dqn(
+        truncated_policy,
+        truncated_optimizer,
+        truncated_replay,
+        config=DQNConfig(
+            batch_size=1,
+            replay_capacity=2,
+            warmup_steps=1,
+            max_grad_norm=None,
+        ),
+    )
+    truncated_after = _dqn_action_q(torch, truncated_policy, features, action_index=1)
+
+    assert terminal_loss == pytest.approx(0.0)
+    assert terminal_after == pytest.approx(terminal_before)
+    assert truncated_loss is not None
+    assert truncated_loss > 0.0
+    assert truncated_after > truncated_before
+
+
 def test_dqn_training_skips_tick_rewind_reset_attempts(
     tmp_path: Path,
 ) -> None:
@@ -426,7 +512,7 @@ def test_dqn_training_skips_tick_rewind_reset_attempts(
     assert attempt.replay_size == 0
     assert attempt.replay_appended_count == 0
     assert attempt.replay_skipped is True
-    assert attempt.replay_skip_reason == "death_reason:tick_rewind_reset"
+    assert attempt.replay_skip_reason == "aborted:tick_rewind_reset"
     assert attempt.attempt_result["death_tick"] == 0
     assert after_hold_q == pytest.approx(before_hold_q)
     assert written_summary["attempts"][0]["replay_skipped"] is True
@@ -549,6 +635,39 @@ def _bias_dqn_toward_hold(torch, policy: TinyLiveDQNNetwork) -> None:  # type: i
             torch.tensor([0.0, 1.0], dtype=torch.float32)
         )
     policy.sync_target()
+
+
+def _zero_dqn_with_target_next_q(torch) -> TinyLiveDQNNetwork:  # type: ignore[no-untyped-def]
+    policy = TinyLiveDQNNetwork.from_encoder_config(
+        NeuralPolicyConfig(hidden_size=4, seed=19),
+        history_length=0,
+    )
+    with torch.no_grad():
+        for parameter in policy.q_network.parameters():
+            parameter.zero_()
+        for parameter in policy.target_network.parameters():
+            parameter.zero_()
+        policy.target_network[2].bias.copy_(
+            torch.tensor([1.0, 1.0], dtype=torch.float32)
+        )
+    return policy
+
+
+def _dqn_action_q(
+    torch,  # type: ignore[no-untyped-def]
+    policy: TinyLiveDQNNetwork,
+    features: list[float],
+    *,
+    action_index: int,
+) -> float:
+    feature_tensor = torch.tensor(
+        features,
+        dtype=torch.float32,
+        device=policy.device,
+    ).unsqueeze(0)
+    with torch.no_grad():
+        values = policy.q_network(feature_tensor)
+    return float(values[0, action_index].detach().cpu().item())
 
 
 def _profile() -> HumanProfile:

@@ -89,6 +89,20 @@ class LiveStepResult:
     reward: float
     done: bool
     info: dict[str, Any]
+    terminated: bool | None = None
+    truncated: bool = False
+    aborted: bool = False
+
+    def __post_init__(self) -> None:
+        terminated = self.terminated
+        if terminated is None:
+            terminated = self.done and not self.truncated and not self.aborted
+            object.__setattr__(self, "terminated", terminated)
+        expected_done = bool(terminated or self.truncated or self.aborted)
+        if self.done != expected_done:
+            raise ValueError(
+                "done must equal terminated or truncated or aborted"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,13 +354,33 @@ class LivePracticeEnv:
         reward = sum(reward_terms.values())
         self._total_step_reward += reward
         self._best_percent = max(self._best_percent, next_observation.percent)
-        self._done = (
-            _is_terminal_observation(
-                next_observation,
-                success_percent=self.config.success_percent,
-            )
-            or self._step_count >= self.config.max_steps
+        terminal_observation = _is_terminal_observation(
+            next_observation,
+            success_percent=self.config.success_percent,
         )
+        terminated = terminal_observation and not tick_rewound
+        truncated = (
+            not terminated
+            and not tick_rewound
+            and self._step_count >= self.config.max_steps
+        )
+        aborted = tick_rewound
+        self._done = terminated or truncated or aborted
+
+        termination_reason: str | None = None
+        if terminated:
+            termination_reason = (
+                "clear"
+                if _is_clear_observation(
+                    next_observation,
+                    success_percent=self.config.success_percent,
+                )
+                else "death"
+            )
+        truncation_reason = "max_steps" if truncated else None
+        abort_reason = None
+        if aborted:
+            abort_reason = next_observation.death_reason or "tick_rewind_reset"
 
         info = {
             "attempt_index": self._attempt_index,
@@ -361,6 +395,12 @@ class LivePracticeEnv:
             "raw_observation": next_observation.to_dict(),
             "pending_executed_event_count": human.pending_count,
             "max_steps_reached": self._step_count >= self.config.max_steps,
+            "terminated": terminated,
+            "truncated": truncated,
+            "aborted": aborted,
+            "termination_reason": termination_reason,
+            "truncation_reason": truncation_reason,
+            "abort_reason": abort_reason,
         }
         self._step_rewards.append(
             {
@@ -386,6 +426,9 @@ class LivePracticeEnv:
             reward=reward,
             done=self._done,
             info=info,
+            terminated=terminated,
+            truncated=truncated,
+            aborted=aborted,
         )
 
     def save_attempt(self) -> AttemptResult:

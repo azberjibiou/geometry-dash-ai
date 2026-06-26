@@ -805,6 +805,20 @@ class DQNTransition:
     reward: float
     next_features: list[float]
     done: bool
+    terminated: bool | None = None
+    truncated: bool = False
+    aborted: bool = False
+
+    def __post_init__(self) -> None:
+        terminated = self.terminated
+        if terminated is None:
+            terminated = self.done and not self.truncated and not self.aborted
+            object.__setattr__(self, "terminated", terminated)
+        expected_done = bool(terminated or self.truncated or self.aborted)
+        if self.done != expected_done:
+            raise LiveLearnerError(
+                "transition done must equal terminated or truncated or aborted"
+            )
 
 
 class DQNReplayBuffer:
@@ -1462,6 +1476,9 @@ def run_dqn_attempt(
                 reward=step_reward,
                 next_features=next_features,
                 done=last_step.done,
+                terminated=last_step.terminated,
+                truncated=last_step.truncated,
+                aborted=last_step.aborted,
             )
         )
 
@@ -1590,6 +1607,9 @@ def _dqn_replay_skip_reason(
 ) -> str | None:
     if last_step is None:
         return None
+    if last_step.aborted:
+        abort_reason = last_step.info.get("abort_reason") or "unknown"
+        return f"aborted:{abort_reason}"
     death_reason = last_step.observation.latest.death_reason
     if death_reason in config.skip_replay_death_reasons:
         return f"death_reason:{death_reason}"
@@ -1807,8 +1827,8 @@ def _optimize_dqn(
         dtype=torch.float32,
         device=policy.device,
     )
-    done_tensor = torch.tensor(
-        [1.0 if transition.done else 0.0 for transition in batch],
+    terminated_tensor = torch.tensor(
+        [1.0 if transition.terminated else 0.0 for transition in batch],
         dtype=torch.float32,
         device=policy.device,
     )
@@ -1816,7 +1836,7 @@ def _optimize_dqn(
     predicted_q = policy.q_network(feature_tensor).gather(1, action_tensor).squeeze(1)
     with torch.no_grad():
         next_q = policy.target_network(next_feature_tensor).max(dim=1).values
-        target_q = reward_tensor + config.gamma * (1.0 - done_tensor) * next_q
+        target_q = reward_tensor + config.gamma * (1.0 - terminated_tensor) * next_q
 
     loss_tensor = torch.nn.functional.smooth_l1_loss(predicted_q, target_q)
     optimizer.zero_grad(set_to_none=True)
