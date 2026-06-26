@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, Sequence
@@ -145,6 +146,60 @@ class ActorCriticConfig:
             raise LiveLearnerError("death_local_window must be non-negative")
         if self.death_local_penalty < 0.0:
             raise LiveLearnerError("death_local_penalty must be non-negative")
+        if self.input_rate_penalty < 0.0:
+            raise LiveLearnerError("input_rate_penalty must be non-negative")
+        if self.min_dwell_ticks < 0:
+            raise LiveLearnerError("min_dwell_ticks must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class DQNConfig:
+    """Small value-based baseline for closed-loop live practice."""
+
+    attempts: int = 1
+    gamma: float = 0.99
+    learning_rate: float = 1e-3
+    epsilon_start: float = 0.20
+    epsilon_end: float = 0.05
+    epsilon_decay_steps: int = 1000
+    batch_size: int = 32
+    replay_capacity: int = 2048
+    warmup_steps: int = 32
+    target_update_interval: int = 100
+    max_grad_norm: float | None = 1.0
+    deterministic_actions: bool = False
+    seed: int = 0
+    history_length: int = 4
+    input_rate_penalty: float = 0.0
+    min_dwell_ticks: int = 4
+
+    def __post_init__(self) -> None:
+        if self.attempts <= 0:
+            raise LiveLearnerError("attempts must be positive")
+        if not 0.0 <= self.gamma <= 1.0:
+            raise LiveLearnerError("gamma must be between 0 and 1")
+        if self.learning_rate <= 0.0:
+            raise LiveLearnerError("learning_rate must be positive")
+        if not 0.0 <= self.epsilon_start <= 1.0:
+            raise LiveLearnerError("epsilon_start must be between 0 and 1")
+        if not 0.0 <= self.epsilon_end <= 1.0:
+            raise LiveLearnerError("epsilon_end must be between 0 and 1")
+        if self.epsilon_decay_steps <= 0:
+            raise LiveLearnerError("epsilon_decay_steps must be positive")
+        if self.batch_size <= 0:
+            raise LiveLearnerError("batch_size must be positive")
+        if self.replay_capacity <= 0:
+            raise LiveLearnerError("replay_capacity must be positive")
+        if self.replay_capacity < self.batch_size:
+            raise LiveLearnerError("replay_capacity must be at least batch_size")
+        if self.warmup_steps < 0:
+            raise LiveLearnerError("warmup_steps must be non-negative")
+        if self.target_update_interval <= 0:
+            raise LiveLearnerError("target_update_interval must be positive")
+        if self.max_grad_norm is not None and self.max_grad_norm <= 0.0:
+            raise LiveLearnerError("max_grad_norm must be positive or None")
+        if self.history_length < 0:
+            raise LiveLearnerError("history_length must be non-negative")
         if self.input_rate_penalty < 0.0:
             raise LiveLearnerError("input_rate_penalty must be non-negative")
         if self.min_dwell_ticks < 0:
@@ -341,6 +396,36 @@ class ActorCriticActionDecision:
         }
 
 
+@dataclass(slots=True)
+class DQNActionDecision:
+    """One epsilon-greedy DQN decision for desired button state."""
+
+    intent: IntendedAction
+    action_index: int
+    desired_input_state: DesiredInputState
+    effective_input_state: DesiredInputState
+    dwell_blocked: bool
+    desired_holding: bool
+    epsilon: float
+    greedy: bool
+    q_values: list[float]
+    features: list[float]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "intent": asdict(self.intent),
+            "action_index": self.action_index,
+            "desired_input_state": self.desired_input_state,
+            "effective_input_state": self.effective_input_state,
+            "dwell_blocked": self.dwell_blocked,
+            "desired_holding": self.desired_holding,
+            "epsilon": self.epsilon,
+            "greedy": self.greedy,
+            "q_values": list(self.q_values),
+            "features": list(self.features),
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class ReinforceAttemptSummary:
     """Training metrics for one live attempt."""
@@ -410,6 +495,50 @@ class ActorCriticTrainingSummary:
     """Aggregate metrics for a short live actor-critic run."""
 
     attempts: list[ActorCriticAttemptSummary]
+    config: dict[str, Any]
+
+    @property
+    def attempt_count(self) -> int:
+        return len(self.attempts)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempt_count": self.attempt_count,
+            "config": dict(self.config),
+            "attempts": [attempt.to_dict() for attempt in self.attempts],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DQNAttemptSummary:
+    """Training metrics for one tiny DQN live attempt."""
+
+    attempt_index: int
+    step_count: int
+    total_step_reward: float
+    total_training_reward: float
+    mean_loss: float | None
+    last_loss: float | None
+    update_count: int
+    replay_size: int
+    epsilon_start: float
+    epsilon_end: float
+    q_value_stats: dict[str, float]
+    action_counts: dict[str, int]
+    effective_action_counts: dict[str, int]
+    dwell_blocked_count: int
+    intent_counts: dict[str, int]
+    attempt_result: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class DQNTrainingSummary:
+    """Aggregate metrics for a short live DQN baseline run."""
+
+    attempts: list[DQNAttemptSummary]
     config: dict[str, Any]
 
     @property
@@ -661,6 +790,164 @@ class TinyLiveActorCriticNetwork:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class DQNTransition:
+    """One transition stored by the tiny DQN replay buffer."""
+
+    features: list[float]
+    action_index: int
+    reward: float
+    next_features: list[float]
+    done: bool
+
+
+class DQNReplayBuffer:
+    """Small in-memory replay buffer for short diagnostic live runs."""
+
+    def __init__(self, capacity: int) -> None:
+        if capacity <= 0:
+            raise LiveLearnerError("replay buffer capacity must be positive")
+        self.capacity = capacity
+        self._items: deque[DQNTransition] = deque(maxlen=capacity)
+
+    def append(self, transition: DQNTransition) -> None:
+        self._items.append(transition)
+
+    def sample(self, batch_size: int) -> list[DQNTransition]:
+        if batch_size <= 0:
+            raise LiveLearnerError("batch_size must be positive")
+        return random.sample(list(self._items), batch_size)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+class TinyLiveDQNNetwork:
+    """Small MLP Q-network for desired idle/hold state values."""
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        config: NeuralPolicyConfig | None = None,
+        history_length: int = 4,
+    ) -> None:
+        self.config = config or NeuralPolicyConfig()
+        if input_dim <= 0:
+            raise LiveLearnerError("input_dim must be positive")
+        if history_length < 0:
+            raise LiveLearnerError("history_length must be non-negative")
+        self.input_dim = input_dim
+        self.history_length = history_length
+        self.output_dim = len(DESIRED_INPUT_STATES)
+        self.torch = _import_torch()
+        _set_seed(self.torch, self.config.seed)
+        self.device = self.torch.device(self.config.device)
+        self.q_network = self._build_network().to(self.device)
+        self.target_network = self._build_network().to(self.device)
+        self.sync_target()
+
+    @classmethod
+    def from_encoder_config(
+        cls,
+        config: NeuralPolicyConfig | None = None,
+        *,
+        history_length: int = 4,
+    ) -> "TinyLiveDQNNetwork":
+        effective_config = config or NeuralPolicyConfig()
+        return cls(
+            input_dim=dqn_feature_dim(history_length),
+            config=effective_config,
+            history_length=history_length,
+        )
+
+    def _build_network(self) -> Any:
+        return self.torch.nn.Sequential(
+            self.torch.nn.Linear(self.input_dim, self.config.hidden_size),
+            self.torch.nn.Tanh(),
+            self.torch.nn.Linear(self.config.hidden_size, self.output_dim),
+        )
+
+    def sync_target(self) -> None:
+        self.target_network.load_state_dict(self.q_network.state_dict())
+        self.target_network.eval()
+
+    def q_values_from_features(self, features: Sequence[float]) -> Any:
+        feature_tensor = self.torch.tensor(
+            list(features),
+            dtype=self.torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
+        return self.q_network(feature_tensor).squeeze(0)
+
+    def q_values(
+        self,
+        observation: LivePracticeObservation,
+        *,
+        history: LiveActionHistory | None = None,
+    ) -> list[float]:
+        features = encode_dqn_observation(
+            observation,
+            history=history,
+            history_length=self.history_length,
+            config=self.config.encoder,
+        )
+        with self.torch.no_grad():
+            values = self.q_values_from_features(features)
+        return [float(value) for value in values.detach().cpu().tolist()]
+
+    def act(
+        self,
+        observation: LivePracticeObservation,
+        *,
+        intent_adapter: ButtonStateIntentAdapter | None = None,
+        history: LiveActionHistory | None = None,
+        epsilon: float = 0.0,
+        deterministic: bool = False,
+    ) -> DQNActionDecision:
+        features = encode_dqn_observation(
+            observation,
+            history=history,
+            history_length=self.history_length,
+            config=self.config.encoder,
+        )
+        q_values_tensor = self.q_values_from_features(features)
+        q_values = [float(value) for value in q_values_tensor.detach().cpu().tolist()]
+        greedy_index = int(q_values_tensor.argmax(dim=-1).detach().cpu().item())
+        if deterministic or random.random() >= epsilon:
+            action_index = greedy_index
+            greedy = True
+        else:
+            action_index = random.randrange(self.output_dim)
+            greedy = action_index == greedy_index
+
+        desired_input_state = DESIRED_INPUT_STATES[action_index]
+        adapter = intent_adapter or _adapter_from_observation(observation)
+        intent = adapter.intent_for_desired_state(
+            desired_input_state,
+            tick=observation.tick,
+        )
+        effective_input_state = adapter.effective_input_state
+        return DQNActionDecision(
+            intent=intent,
+            action_index=action_index,
+            desired_input_state=desired_input_state,
+            effective_input_state=effective_input_state,
+            dwell_blocked=effective_input_state != desired_input_state,
+            desired_holding=desired_input_state == "hold",
+            epsilon=0.0 if deterministic else epsilon,
+            greedy=greedy,
+            q_values=q_values,
+            features=features,
+        )
+
+    def make_optimizer(self, config: DQNConfig) -> Any:
+        return self.torch.optim.Adam(
+            self.q_network.parameters(),
+            lr=config.learning_rate,
+        )
+
+
 def encode_live_observation(
     observation: LivePracticeObservation,
     *,
@@ -735,6 +1022,27 @@ def actor_critic_feature_dim(history_length: int = 4) -> int:
     return live_observation_feature_dim() + live_action_history_feature_dim(
         history_length
     )
+
+
+def encode_dqn_observation(
+    observation: LivePracticeObservation,
+    *,
+    history: LiveActionHistory | None = None,
+    history_length: int = 4,
+    config: LiveObservationEncoderConfig | None = None,
+) -> list[float]:
+    """Encode the same compact delayed observation/history state for DQN."""
+
+    return encode_actor_critic_observation(
+        observation,
+        history=history,
+        history_length=history_length,
+        config=config,
+    )
+
+
+def dqn_feature_dim(history_length: int = 4) -> int:
+    return actor_critic_feature_dim(history_length)
 
 
 def run_reinforce_attempt(
@@ -1064,6 +1372,183 @@ def run_actor_critic_training(
     return summary
 
 
+def run_dqn_attempt(
+    env: LiveStepEnvLike,
+    policy: TinyLiveDQNNetwork,
+    optimizer: Any,
+    replay_buffer: DQNReplayBuffer,
+    *,
+    attempt_index: int,
+    config: DQNConfig | None = None,
+    global_step_start: int = 0,
+) -> DQNAttemptSummary:
+    """Run one live episode and apply online replay-based DQN updates."""
+
+    effective_config = config or DQNConfig()
+    observation = env.reset(attempt_index=attempt_index)
+    step_rewards: list[float] = []
+    training_rewards: list[float] = []
+    losses: list[float] = []
+    selected_q_values: list[float] = []
+    action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    effective_action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    dwell_blocked_count = 0
+    intent_counts = {kind: 0 for kind in ACTION_KINDS}
+    intent_adapter = ButtonStateIntentAdapter(
+        min_dwell_ticks=effective_config.min_dwell_ticks
+    )
+    intent_adapter.reset(observation)
+    history = LiveActionHistory(length=effective_config.history_length)
+    global_step = global_step_start
+    update_count = 0
+    epsilon_first: float | None = None
+    epsilon_last = 0.0
+    last_step: LiveStepResult | None = None
+
+    while True:
+        epsilon = _linear_epsilon(effective_config, global_step)
+        if epsilon_first is None:
+            epsilon_first = epsilon
+        epsilon_last = epsilon
+        decision = policy.act(
+            observation,
+            intent_adapter=intent_adapter,
+            history=history,
+            epsilon=epsilon,
+            deterministic=effective_config.deterministic_actions,
+        )
+        action_counts[decision.desired_input_state] += 1
+        effective_action_counts[decision.effective_input_state] += 1
+        if decision.dwell_blocked:
+            dwell_blocked_count += 1
+        intent_counts[decision.intent.kind] += 1
+        selected_q_values.append(decision.q_values[decision.action_index])
+
+        last_step = env.step(decision.intent)
+        base_reward = float(last_step.reward)
+        rate_penalty = (
+            -effective_config.input_rate_penalty
+            if decision.intent.kind != "no_op"
+            else 0.0
+        )
+        step_reward = base_reward + rate_penalty
+        step_rewards.append(base_reward)
+        training_rewards.append(step_reward)
+
+        history.append(
+            desired_input_state=decision.effective_input_state,
+            intent_kind=decision.intent.kind,
+        )
+        next_features = encode_dqn_observation(
+            last_step.observation,
+            history=history,
+            history_length=effective_config.history_length,
+            config=policy.config.encoder,
+        )
+        replay_buffer.append(
+            DQNTransition(
+                features=decision.features,
+                action_index=decision.action_index,
+                reward=step_reward,
+                next_features=next_features,
+                done=last_step.done,
+            )
+        )
+        global_step += 1
+
+        loss = _optimize_dqn(
+            policy,
+            optimizer,
+            replay_buffer,
+            config=effective_config,
+        )
+        if loss is not None:
+            losses.append(loss)
+            update_count += 1
+        if global_step % effective_config.target_update_interval == 0:
+            policy.sync_target()
+
+        observation = last_step.observation
+        if last_step.done:
+            break
+
+    attempt_result = _attempt_result_from_last_step(env, last_step)
+    return DQNAttemptSummary(
+        attempt_index=attempt_index,
+        step_count=len(step_rewards),
+        total_step_reward=sum(step_rewards),
+        total_training_reward=sum(training_rewards),
+        mean_loss=(sum(losses) / len(losses)) if losses else None,
+        last_loss=losses[-1] if losses else None,
+        update_count=update_count,
+        replay_size=len(replay_buffer),
+        epsilon_start=epsilon_first if epsilon_first is not None else 0.0,
+        epsilon_end=epsilon_last,
+        q_value_stats=_float_stats(selected_q_values),
+        action_counts={kind: int(count) for kind, count in action_counts.items()},
+        effective_action_counts={
+            kind: int(count) for kind, count in effective_action_counts.items()
+        },
+        dwell_blocked_count=dwell_blocked_count,
+        intent_counts={kind: int(count) for kind, count in intent_counts.items()},
+        attempt_result=attempt_result,
+    )
+
+
+def run_dqn_training(
+    env: LiveStepEnvLike,
+    policy: TinyLiveDQNNetwork,
+    *,
+    config: DQNConfig | None = None,
+    summary_path: str | Path | None = None,
+) -> DQNTrainingSummary:
+    """Run a short DQN baseline practice session."""
+
+    effective_config = config or DQNConfig()
+    random.seed(effective_config.seed)
+    policy.torch.manual_seed(effective_config.seed)
+    optimizer = policy.make_optimizer(effective_config)
+    replay_buffer = DQNReplayBuffer(effective_config.replay_capacity)
+    global_step = 0
+    attempts: list[DQNAttemptSummary] = []
+    for attempt_index in range(1, effective_config.attempts + 1):
+        attempt = run_dqn_attempt(
+            env,
+            policy,
+            optimizer,
+            replay_buffer,
+            attempt_index=attempt_index,
+            config=effective_config,
+            global_step_start=global_step,
+        )
+        attempts.append(attempt)
+        global_step += attempt.step_count
+
+    summary = DQNTrainingSummary(
+        attempts=attempts,
+        config={
+            **asdict(effective_config),
+            "algorithm": "tiny_dqn",
+            "policy": {
+                "input_dim": policy.input_dim,
+                "output_dim": policy.output_dim,
+                "desired_input_states": list(DESIRED_INPUT_STATES),
+                "intent_action_kinds": list(ACTION_KINDS),
+                "hidden_size": policy.config.hidden_size,
+                "device": policy.config.device,
+                "encoder": asdict(policy.config.encoder),
+                "history_length": policy.history_length,
+                "history_feature_dim": live_action_history_feature_dim(
+                    policy.history_length
+                ),
+            },
+        },
+    )
+    if summary_path is not None:
+        _write_json(summary.to_dict(), Path(summary_path))
+    return summary
+
+
 def _attempt_result_from_last_step(
     env: LiveStepEnvLike,
     last_step: LiveStepResult | None,
@@ -1243,6 +1728,84 @@ def _compact_recent_steps(steps: Sequence[dict[str, Any]]) -> list[dict[str, Any
         "training_reward",
     )
     return [{key: step.get(key) for key in keys} for step in steps]
+
+
+def _linear_epsilon(config: DQNConfig, global_step: int) -> float:
+    if config.deterministic_actions:
+        return 0.0
+    progress = _clamp(global_step / config.epsilon_decay_steps)
+    return config.epsilon_start + progress * (
+        config.epsilon_end - config.epsilon_start
+    )
+
+
+def _optimize_dqn(
+    policy: TinyLiveDQNNetwork,
+    optimizer: Any,
+    replay_buffer: DQNReplayBuffer,
+    *,
+    config: DQNConfig,
+) -> float | None:
+    ready_count = max(config.batch_size, config.warmup_steps)
+    if len(replay_buffer) < ready_count:
+        return None
+
+    batch = replay_buffer.sample(config.batch_size)
+    torch = policy.torch
+    feature_tensor = torch.tensor(
+        [transition.features for transition in batch],
+        dtype=torch.float32,
+        device=policy.device,
+    )
+    action_tensor = torch.tensor(
+        [transition.action_index for transition in batch],
+        dtype=torch.int64,
+        device=policy.device,
+    ).unsqueeze(1)
+    reward_tensor = torch.tensor(
+        [transition.reward for transition in batch],
+        dtype=torch.float32,
+        device=policy.device,
+    )
+    next_feature_tensor = torch.tensor(
+        [transition.next_features for transition in batch],
+        dtype=torch.float32,
+        device=policy.device,
+    )
+    done_tensor = torch.tensor(
+        [1.0 if transition.done else 0.0 for transition in batch],
+        dtype=torch.float32,
+        device=policy.device,
+    )
+
+    predicted_q = policy.q_network(feature_tensor).gather(1, action_tensor).squeeze(1)
+    with torch.no_grad():
+        next_q = policy.target_network(next_feature_tensor).max(dim=1).values
+        target_q = reward_tensor + config.gamma * (1.0 - done_tensor) * next_q
+
+    loss_tensor = torch.nn.functional.smooth_l1_loss(predicted_q, target_q)
+    optimizer.zero_grad(set_to_none=True)
+    loss_tensor.backward()
+    if config.max_grad_norm is not None:
+        torch.nn.utils.clip_grad_norm_(
+            policy.q_network.parameters(),
+            config.max_grad_norm,
+        )
+    optimizer.step()
+    return float(loss_tensor.detach().cpu().item())
+
+
+def _float_stats(values: Sequence[float]) -> dict[str, float]:
+    if not values:
+        return {"mean": 0.0, "min": 0.0, "max": 0.0, "std": 0.0}
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return {
+        "mean": mean,
+        "min": min(values),
+        "max": max(values),
+        "std": variance**0.5,
+    }
 
 
 def _tensor_stats(torch: Any, tensor: Any) -> dict[str, float]:

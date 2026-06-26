@@ -8,6 +8,7 @@ from gd_human_model import Event, HumanProfile
 from gd_rl import (
     ActorCriticConfig,
     ButtonStateIntentAdapter,
+    DQNConfig,
     IntendedAction,
     LiveActionHistory,
     LiveObservationEncoderConfig,
@@ -17,12 +18,16 @@ from gd_rl import (
     NeuralPolicyConfig,
     ReinforceConfig,
     TinyLiveActorCriticNetwork,
+    TinyLiveDQNNetwork,
     TinyLivePolicyNetwork,
     actor_critic_feature_dim,
+    dqn_feature_dim,
     encode_actor_critic_observation,
+    encode_dqn_observation,
     encode_live_observation,
     live_observation_feature_dim,
     run_actor_critic_training,
+    run_dqn_training,
     run_reinforce_training,
 )
 
@@ -120,6 +125,30 @@ def test_actor_critic_encoder_appends_recent_intended_history() -> None:
         config=LiveObservationEncoderConfig(max_tick=100, x_scale=100.0),
     )
     assert features[-8:] == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+
+
+def test_dqn_encoder_uses_same_delay_aware_features() -> None:
+    observation = LivePracticeObservation(
+        latest=_observation(20, percent=80.0, x=200.0),
+        policy_observation=_observation(10, percent=25.0, x=50.0),
+    )
+    history = LiveActionHistory(length=1)
+    history.append(desired_input_state="hold", intent_kind="press")
+
+    features = encode_dqn_observation(
+        observation,
+        history=history,
+        history_length=1,
+        config=LiveObservationEncoderConfig(max_tick=100, x_scale=100.0),
+    )
+
+    assert len(features) == dqn_feature_dim(1)
+    assert features == encode_actor_critic_observation(
+        observation,
+        history=history,
+        history_length=1,
+        config=LiveObservationEncoderConfig(max_tick=100, x_scale=100.0),
+    )
 
 
 def test_reinforce_training_updates_hold_probability_and_writes_summary(
@@ -281,6 +310,65 @@ def test_actor_critic_death_local_feedback_weights_recent_window(
     )
 
 
+def test_dqn_training_updates_hold_q_value_and_writes_summary(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    fake_client = OneStepPressRewardClient()
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="one_step_press_reward",
+            output_dir=tmp_path / "attempts",
+            max_steps=1,
+            action_horizon_ticks=0,
+            success_percent=100.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+    policy = TinyLiveDQNNetwork.from_encoder_config(
+        NeuralPolicyConfig(hidden_size=4, seed=13),
+        history_length=1,
+    )
+    _bias_dqn_toward_hold(torch, policy)
+    observation = LivePracticeObservation(
+        latest=_observation(0, percent=0.0),
+        policy_observation=_observation(0, percent=0.0),
+    )
+    before_hold_q = policy.q_values(observation)[1]
+
+    with env:
+        summary = run_dqn_training(
+            env,
+            policy,
+            config=DQNConfig(
+                attempts=1,
+                learning_rate=0.05,
+                deterministic_actions=True,
+                history_length=1,
+                batch_size=1,
+                replay_capacity=4,
+                warmup_steps=1,
+            ),
+            summary_path=tmp_path / "dqn_summary.json",
+        )
+
+    after_hold_q = policy.q_values(observation)[1]
+    written_summary = json.loads(
+        (tmp_path / "dqn_summary.json").read_text(encoding="utf-8")
+    )
+
+    assert fake_client.sent_events == [Event(0, "press")]
+    assert after_hold_q > before_hold_q
+    assert summary.attempt_count == 1
+    assert summary.attempts[0].action_counts["hold"] == 1
+    assert summary.attempts[0].intent_counts["press"] == 1
+    assert summary.attempts[0].update_count == 1
+    assert summary.attempts[0].attempt_result["cleared"] is True
+    assert written_summary["config"]["algorithm"] == "tiny_dqn"
+    assert written_summary["config"]["policy"]["history_length"] == 1
+
+
 class OneStepPressRewardClient:
     def __init__(self) -> None:
         self.connected = False
@@ -374,6 +462,16 @@ def _zero_actor_critic(torch, policy: TinyLiveActorCriticNetwork) -> None:  # ty
         for module in (policy.shared, policy.actor_head, policy.value_head):
             for parameter in module.parameters():
                 parameter.zero_()
+
+
+def _bias_dqn_toward_hold(torch, policy: TinyLiveDQNNetwork) -> None:  # type: ignore[no-untyped-def]
+    with torch.no_grad():
+        for parameter in policy.q_network.parameters():
+            parameter.zero_()
+        policy.q_network[2].bias.copy_(
+            torch.tensor([0.0, 1.0], dtype=torch.float32)
+        )
+    policy.sync_target()
 
 
 def _profile() -> HumanProfile:

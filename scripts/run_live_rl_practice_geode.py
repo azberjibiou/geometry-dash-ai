@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from gd_env import GeometryDashClient
 from gd_rl import (
     ActorCriticConfig,
+    DQNConfig,
     LiveLearnerError,
     LiveObservationEncoderConfig,
     LivePracticeEnv,
@@ -24,8 +25,10 @@ from gd_rl import (
     ReinforceConfig,
     RewardConfig,
     TinyLiveActorCriticNetwork,
+    TinyLiveDQNNetwork,
     TinyLivePolicyNetwork,
     run_actor_critic_training,
+    run_dqn_training,
     run_reinforce_training,
 )
 from gd_rl.live_env import LiveGeodeClientLike
@@ -52,11 +55,26 @@ def main(
         help="load a complete HumanProfile JSON object instead of a built-in profile",
     )
     parser.add_argument(
+        "--compact-output",
+        action="store_true",
+        help="print only run-level learning metrics; full summary remains on disk",
+    )
+    parser.add_argument(
         "--base-seed",
         type=int,
         help="first humanization seed; defaults to the selected profile seed",
     )
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--checkpoint-path",
+        type=Path,
+        help="write the final neural policy checkpoint after training",
+    )
+    parser.add_argument(
+        "--load-checkpoint",
+        type=Path,
+        help="load a compatible neural policy checkpoint before training",
+    )
 
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=29430)
@@ -90,7 +108,7 @@ def main(
 
     parser.add_argument(
         "--algorithm",
-        choices=("a2c", "reinforce"),
+        choices=("a2c", "reinforce", "dqn"),
         default="a2c",
         help="tiny live learner to run; defaults to the Phase D actor-critic path",
     )
@@ -112,6 +130,13 @@ def main(
     parser.add_argument("--death-local-window", type=int, default=24)
     parser.add_argument("--death-local-penalty", type=float, default=1.0)
     parser.add_argument("--input-rate-penalty", type=float, default=0.0)
+    parser.add_argument("--epsilon-start", type=float, default=0.20)
+    parser.add_argument("--epsilon-end", type=float, default=0.05)
+    parser.add_argument("--epsilon-decay-steps", type=int, default=1000)
+    parser.add_argument("--dqn-batch-size", type=int, default=32)
+    parser.add_argument("--dqn-replay-capacity", type=int, default=2048)
+    parser.add_argument("--dqn-warmup-steps", type=int, default=32)
+    parser.add_argument("--dqn-target-update-interval", type=int, default=100)
     parser.add_argument(
         "--min-dwell-ticks",
         type=int,
@@ -139,6 +164,7 @@ def main(
         reward_config = _build_reward_config(args)
         reinforce_config = _build_reinforce_config(args)
         actor_critic_config = _build_actor_critic_config(args)
+        dqn_config = _build_dqn_config(args)
         policy_config = _build_policy_config(args)
     except (ValueError, LiveLearnerError) as exc:
         parser.error(str(exc))
@@ -165,10 +191,23 @@ def main(
         ) as env:
             if args.algorithm == "reinforce":
                 policy = TinyLivePolicyNetwork.from_encoder_config(policy_config)
+                _load_policy_checkpoint(policy, args.load_checkpoint)
                 summary = run_reinforce_training(
                     env,
                     policy,
                     config=reinforce_config,
+                    summary_path=summary_path,
+                )
+            elif args.algorithm == "dqn":
+                policy = TinyLiveDQNNetwork.from_encoder_config(
+                    policy_config,
+                    history_length=dqn_config.history_length,
+                )
+                _load_policy_checkpoint(policy, args.load_checkpoint)
+                summary = run_dqn_training(
+                    env,
+                    policy,
+                    config=dqn_config,
                     summary_path=summary_path,
                 )
             else:
@@ -176,6 +215,7 @@ def main(
                     policy_config,
                     history_length=actor_critic_config.history_length,
                 )
+                _load_policy_checkpoint(policy, args.load_checkpoint)
                 summary = run_actor_critic_training(
                     env,
                     policy,
@@ -189,17 +229,25 @@ def main(
         print(f"error: bridge communication failed: {exc}", file=sys.stderr)
         return 1
 
-    print(
-        json.dumps(
-            {
-                "output_dir": str(output_dir),
-                "training_summary_json": str(summary_path),
-                "summary": summary.to_dict(),
-            },
-            indent=2,
-            sort_keys=True,
+    checkpoint_path = args.checkpoint_path
+    if checkpoint_path is not None:
+        _save_policy_checkpoint(
+            policy,
+            checkpoint_path,
+            algorithm=args.algorithm,
+            policy_config=policy_config,
+            summary_path=summary_path,
         )
-    )
+
+    payload = {
+        "output_dir": str(output_dir),
+        "training_summary_json": str(summary_path),
+        "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+        "summary": summary.to_dict(),
+    }
+    if args.compact_output:
+        payload = _compact_training_payload(payload)
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
@@ -259,11 +307,7 @@ def _build_env_config(
         metadata={
             "run_id": run_id,
             "executor": "geode_live_step",
-            "learner": (
-                "tiny_actor_critic"
-                if args.algorithm == "a2c"
-                else "tiny_reinforce"
-            ),
+            "learner": _learner_name(args.algorithm),
             "algorithm": args.algorithm,
             "script": "run_live_rl_practice_geode.py",
         },
@@ -317,6 +361,152 @@ def _build_actor_critic_config(args: argparse.Namespace) -> ActorCriticConfig:
         input_rate_penalty=args.input_rate_penalty,
         min_dwell_ticks=args.min_dwell_ticks,
     )
+
+
+def _build_dqn_config(args: argparse.Namespace) -> DQNConfig:
+    return DQNConfig(
+        attempts=args.attempts,
+        gamma=args.gamma,
+        learning_rate=args.learning_rate,
+        epsilon_start=args.epsilon_start,
+        epsilon_end=args.epsilon_end,
+        epsilon_decay_steps=args.epsilon_decay_steps,
+        batch_size=args.dqn_batch_size,
+        replay_capacity=args.dqn_replay_capacity,
+        warmup_steps=args.dqn_warmup_steps,
+        target_update_interval=args.dqn_target_update_interval,
+        max_grad_norm=None if args.no_grad_clip else args.max_grad_norm,
+        deterministic_actions=args.deterministic_actions,
+        seed=args.learner_seed,
+        history_length=args.history_length,
+        input_rate_penalty=args.input_rate_penalty,
+        min_dwell_ticks=args.min_dwell_ticks,
+    )
+
+
+def _learner_name(algorithm: str) -> str:
+    if algorithm == "a2c":
+        return "tiny_actor_critic"
+    if algorithm == "dqn":
+        return "tiny_dqn"
+    return "tiny_reinforce"
+
+
+def _compact_training_payload(payload: dict[str, object]) -> dict[str, object]:
+    summary = payload["summary"]
+    if not isinstance(summary, dict):
+        return payload
+    attempts = summary.get("attempts", [])
+    compact_attempts: list[dict[str, object]] = []
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            result = attempt.get("attempt_result", {})
+            if not isinstance(result, dict):
+                result = {}
+            compact_attempts.append(
+                {
+                    "attempt": attempt.get("attempt_index"),
+                    "cleared": result.get("cleared"),
+                    "death_tick": result.get("death_tick"),
+                    "final_percent": result.get("final_percent"),
+                    "best_percent": result.get("best_percent"),
+                    "total_reward": result.get("total_reward"),
+                    "step_count": attempt.get("step_count"),
+                    "action_counts": attempt.get("action_counts"),
+                    "intent_counts": attempt.get("intent_counts"),
+                    "executed_event_count": result.get("executed_event_count"),
+                    "dropped_event_count": result.get("dropped_event_count"),
+                    "update_count": attempt.get("update_count"),
+                    "mean_loss": attempt.get("mean_loss"),
+                    "epsilon_start": attempt.get("epsilon_start"),
+                    "epsilon_end": attempt.get("epsilon_end"),
+                }
+            )
+
+    best_percent_values = [
+        float(attempt["best_percent"])
+        for attempt in compact_attempts
+        if attempt.get("best_percent") is not None
+    ]
+    clear_count = sum(
+        1 for attempt in compact_attempts if bool(attempt.get("cleared"))
+    )
+    return {
+        "output_dir": payload["output_dir"],
+        "training_summary_json": payload["training_summary_json"],
+        "checkpoint_path": payload.get("checkpoint_path"),
+        "attempt_count": summary.get("attempt_count"),
+        "clear_count": clear_count,
+        "best_percent_overall": (
+            max(best_percent_values) if best_percent_values else None
+        ),
+        "attempts": compact_attempts,
+    }
+
+
+def _save_policy_checkpoint(
+    policy: object,
+    path: Path,
+    *,
+    algorithm: str,
+    policy_config: NeuralPolicyConfig,
+    summary_path: Path,
+) -> None:
+    torch = getattr(policy, "torch")
+    checkpoint = {
+        "algorithm": algorithm,
+        "policy_config": {
+            "hidden_size": policy_config.hidden_size,
+            "seed": policy_config.seed,
+            "device": policy_config.device,
+            "encoder": {
+                "max_tick": policy_config.encoder.max_tick,
+                "x_scale": policy_config.encoder.x_scale,
+                "y_scale": policy_config.encoder.y_scale,
+                "velocity_scale": policy_config.encoder.velocity_scale,
+                "rotation_scale": policy_config.encoder.rotation_scale,
+            },
+        },
+        "summary_path": str(summary_path),
+    }
+    if hasattr(policy, "q_network"):
+        checkpoint["q_network"] = policy.q_network.state_dict()
+        checkpoint["target_network"] = policy.target_network.state_dict()
+        checkpoint["history_length"] = policy.history_length
+    elif hasattr(policy, "shared"):
+        checkpoint["shared"] = policy.shared.state_dict()
+        checkpoint["actor_head"] = policy.actor_head.state_dict()
+        checkpoint["value_head"] = policy.value_head.state_dict()
+        checkpoint["history_length"] = policy.history_length
+    elif hasattr(policy, "model"):
+        checkpoint["model"] = policy.model.state_dict()
+    else:
+        raise LiveLearnerError("unsupported policy type for checkpoint saving")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(checkpoint, path)
+
+
+def _load_policy_checkpoint(policy: object, path: Path | None) -> None:
+    if path is None:
+        return
+    torch = getattr(policy, "torch")
+    checkpoint = torch.load(path, map_location=getattr(policy, "device"))
+    if hasattr(policy, "q_network"):
+        policy.q_network.load_state_dict(checkpoint["q_network"])
+        if "target_network" in checkpoint:
+            policy.target_network.load_state_dict(checkpoint["target_network"])
+        else:
+            policy.sync_target()
+    elif hasattr(policy, "shared"):
+        policy.shared.load_state_dict(checkpoint["shared"])
+        policy.actor_head.load_state_dict(checkpoint["actor_head"])
+        policy.value_head.load_state_dict(checkpoint["value_head"])
+    elif hasattr(policy, "model"):
+        policy.model.load_state_dict(checkpoint["model"])
+    else:
+        raise LiveLearnerError("unsupported policy type for checkpoint loading")
 
 
 def _build_client_factory(

@@ -8,6 +8,7 @@ from gd_env import BridgeDiagnostic, BridgeObservation
 from gd_human_model import Event
 from scripts.run_live_rl_practice_geode import (
     _build_actor_critic_config,
+    _build_dqn_config,
     _build_env_config,
     _build_policy_config,
     _build_reinforce_config,
@@ -69,6 +70,13 @@ def args(**overrides: object) -> argparse.Namespace:
         "death_local_window": 24,
         "death_local_penalty": 1.0,
         "input_rate_penalty": 0.0,
+        "epsilon_start": 0.20,
+        "epsilon_end": 0.05,
+        "epsilon_decay_steps": 1000,
+        "dqn_batch_size": 32,
+        "dqn_replay_capacity": 2048,
+        "dqn_warmup_steps": 32,
+        "dqn_target_update_interval": 100,
         "min_dwell_ticks": 4,
     }
     data.update(overrides)
@@ -88,6 +96,7 @@ def test_build_live_rl_configs_keep_smoke_defaults() -> None:
     policy_config = _build_policy_config(namespace)
     reinforce_config = _build_reinforce_config(namespace)
     actor_critic_config = _build_actor_critic_config(namespace)
+    dqn_config = _build_dqn_config(namespace)
 
     assert env_config.max_steps == 600
     assert env_config.post_terminal_delay_seconds == 5.0
@@ -106,6 +115,16 @@ def test_build_live_rl_configs_keep_smoke_defaults() -> None:
     assert actor_critic_config.min_dwell_ticks == 4
     assert actor_critic_config.max_grad_norm == 1.0
     assert _build_actor_critic_config(args(no_grad_clip=True)).max_grad_norm is None
+    assert dqn_config.attempts == 1
+    assert dqn_config.history_length == 4
+    assert dqn_config.epsilon_start == 0.20
+    assert dqn_config.epsilon_end == 0.05
+    assert dqn_config.batch_size == 32
+    assert dqn_config.replay_capacity == 2048
+    assert dqn_config.warmup_steps == 32
+    assert dqn_config.min_dwell_ticks == 4
+    assert dqn_config.max_grad_norm == 1.0
+    assert _build_dqn_config(args(no_grad_clip=True)).max_grad_norm is None
 
 
 def test_live_rl_cli_runs_with_fake_client_and_writes_summary(
@@ -154,6 +173,58 @@ def test_live_rl_cli_runs_with_fake_client_and_writes_summary(
     assert training_summary["config"]["policy"]["device"] == "cpu"
     assert training_summary["config"]["policy"]["history_length"] == 4
     assert attempt_summary["metadata"]["executor"] == "geode_live_step"
+    assert attempt_summary["cleared"] is True
+
+
+def test_live_rl_cli_runs_dqn_with_fake_client_and_writes_summary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pytest.importorskip("torch")
+    fake_client = OneStepTerminalClient()
+    output_dir = tmp_path / "live_dqn_smoke"
+
+    exit_code = main(
+        [
+            "--level-id",
+            "fake_local_level",
+            "--algorithm",
+            "dqn",
+            "--output-dir",
+            str(output_dir),
+            "--attempts",
+            "1",
+            "--max-steps",
+            "1",
+            "--post-terminal-delay-seconds",
+            "0",
+            "--require-start-percent-max",
+            "2",
+            "--require-start-x-max",
+            "50",
+            "--dqn-batch-size",
+            "1",
+            "--dqn-warmup-steps",
+            "1",
+        ],
+        client_factory=lambda: fake_client,
+    )
+
+    stdout = json.loads(capsys.readouterr().out)
+    training_summary = json.loads(
+        (output_dir / "training_summary.json").read_text(encoding="utf-8")
+    )
+    attempt_summary = json.loads(
+        (output_dir / "attempt_001" / "summary.json").read_text(encoding="utf-8")
+    )
+
+    assert exit_code == 0
+    assert stdout["training_summary_json"] == str(output_dir / "training_summary.json")
+    assert training_summary["attempt_count"] == 1
+    assert training_summary["config"]["algorithm"] == "tiny_dqn"
+    assert training_summary["config"]["policy"]["history_length"] == 4
+    assert training_summary["attempts"][0]["update_count"] == 1
+    assert attempt_summary["metadata"]["config"]["metadata"]["learner"] == "tiny_dqn"
     assert attempt_summary["cleared"] is True
 
 

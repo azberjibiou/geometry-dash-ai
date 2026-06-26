@@ -1534,6 +1534,248 @@ Next recommended implementation step:
   validation only, not proof of closed-loop learning.
 ```
 
+Tiny DQN baseline implementation update:
+
+```text
+Implemented:
+  gd_rl/live_learner.py
+    - DQNConfig for a small value-based diagnostic baseline.
+    - TinyLiveDQNNetwork with online and target Q networks.
+    - DQNReplayBuffer and replay-based TD updates.
+    - run_dqn_attempt(...) and run_dqn_training(...).
+    - DQN uses the same compact delayed observation plus LiveActionHistory
+      features as the A2C path.
+    - DQN action space remains desired input state only:
+        idle, hold
+      ButtonStateIntentAdapter still converts desired state transitions into
+      no_op/press/release intent.
+
+  scripts/run_live_rl_practice_geode.py
+    - added --algorithm dqn.
+    - added DQN flags:
+        --epsilon-start
+        --epsilon-end
+        --epsilon-decay-steps
+        --dqn-batch-size
+        --dqn-replay-capacity
+        --dqn-warmup-steps
+        --dqn-target-update-interval
+
+  gd_rl/__init__.py
+    - exported DQN config, network, replay buffer, encoder aliases, and
+      training helpers.
+
+  tests/
+    - fake-client coverage for DQN encoder compatibility, one-step Q update,
+      summary writing, and CLI wiring.
+
+Verification:
+  python scripts/run_live_rl_practice_geode.py --help
+  python -m pytest -q tests/test_live_learner.py tests/test_run_live_rl_practice_geode.py
+  python -m pytest -q
+  result: full pytest passed
+
+Manual TopPlayer DQN live smoke:
+  Command:
+    python scripts/run_live_rl_practice_geode.py
+      --level-id manual_live_dqn_topplayer_smoke
+      --algorithm dqn
+      --profile TopPlayer
+      --attempts 1
+      --max-steps 600
+      --post-terminal-delay-seconds 5
+      --start-guard-reset-retries 3
+      --start-guard-retry-delay-seconds 1
+      --require-start-percent-max 2
+      --require-start-x-max 50
+
+  Artifact:
+    artifacts/live_rl_practice_20260626_112350
+
+  Result:
+    attempts: 1
+    step_count: 206
+    cleared: false
+    death_tick: 206
+    final/best percent: 31.5467
+    row_count: 207
+    total_reward: 41.0716
+    total_step_reward: 40.9950
+    desired action counts: idle 105, hold 101
+    emitted intent counts: no_op 178, press 14, release 14
+    intended_event_count: 28
+    executed_event_count: 25
+    dropped_event_count: 2
+    pending_not_dispatched_count: 1
+    replay_size: 206
+    DQN update_count: 175
+    epsilon: 0.2 -> 0.16925
+    mean_loss: 0.004909
+
+Current recommendation:
+  The TopPlayer DQN live smoke validates the DQN plumbing through the real
+  local/offline bridge, but it is not evidence of closed-loop learning yet.
+  For more live DQN plumbing smoke runs, keep TopPlayer and short runs:
+    python scripts/run_live_rl_practice_geode.py
+      --level-id manual_live_dqn_topplayer_smoke
+      --algorithm dqn
+      --profile TopPlayer
+      --attempts 1
+      --max-steps 600
+      --post-terminal-delay-seconds 5
+      --start-guard-reset-retries 3
+      --start-guard-retry-delay-seconds 1
+      --require-start-percent-max 2
+      --require-start-x-max 50
+
+  Treat this as a DQN baseline/plumbing validation only unless it is run on a
+  closed-loop flying-control fixture and compared against no-input, random
+  desired-state, and fixed-control baselines with changed human seeds.
+```
+
+Long TopPlayer DQN live training update:
+
+```text
+Implemented after first long-run attempt:
+  gd_rl/live_env.py
+    - post_terminal_delay_seconds now waits only after a clear/completed
+      terminal observation.
+    - death terminal attempts restart immediately.
+    - live tick rewind/reset observations are treated as terminal death for
+      the current attempt instead of crashing the trainer.
+
+  scripts/run_live_rl_practice_geode.py
+    - added --compact-output to avoid printing per-step reward payloads during
+      long live training.
+    - added --checkpoint-path and --load-checkpoint for neural policy state.
+
+Verification:
+  python -m pytest -q tests/test_live_practice_env.py tests/test_live_learner.py tests/test_run_live_rl_practice_geode.py
+  python scripts/run_live_rl_practice_geode.py --help
+  python -m pytest -q
+  result: full pytest passed
+
+CUDA/GPU:
+  PyTorch CUDA was available.
+  Device used for long training:
+    --device cuda
+
+100-attempt DQN training smoke:
+  Artifact:
+    artifacts/live_rl_practice_20260626_113107
+  Settings:
+    --algorithm dqn
+    --profile TopPlayer
+    --device cuda
+    --hidden-size 64
+    --attempts 100
+    --max-steps 600
+    --epsilon-start 0.5
+    --epsilon-end 0.05
+    --epsilon-decay-steps 20000
+  Result:
+    clears: 0
+    best_percent_overall: 92.0368
+    best attempt: attempt 47
+    best attempt reached max_steps=600 with no death and no clear
+  Interpretation:
+    The ship controller survived much farther than the previous short smoke,
+    but max_steps=600 truncated the run before the level could finish.
+
+150-attempt DQN training run with max_steps=1000:
+  Command:
+    python scripts/run_live_rl_practice_geode.py
+      --level-id manual_live_dqn_topplayer_cuda_train_150_max1000
+      --algorithm dqn
+      --profile TopPlayer
+      --device cuda
+      --hidden-size 64
+      --attempts 150
+      --max-steps 1000
+      --epsilon-start 0.5
+      --epsilon-end 0.05
+      --epsilon-decay-steps 50000
+      --dqn-batch-size 64
+      --dqn-replay-capacity 50000
+      --dqn-warmup-steps 64
+      --dqn-target-update-interval 250
+      --checkpoint-path artifacts/live_dqn_topplayer_cuda_train_150_final.pt
+      --post-terminal-delay-seconds 5
+      --start-guard-reset-retries 3
+      --start-guard-retry-delay-seconds 1
+      --require-start-percent-max 2
+      --require-start-x-max 50
+      --compact-output
+
+  Artifact:
+    artifacts/live_rl_practice_20260626_113609
+
+  Checkpoint:
+    artifacts/live_dqn_topplayer_cuda_train_150_final.pt
+
+  Result:
+    attempts: 150
+    clears: 2
+    best_percent_overall: 100.0
+    clear attempts:
+      attempt 142:
+        step_count: 653
+        executed_event_count: 82
+        total_reward: 252.3471
+      attempt 147:
+        step_count: 652
+        executed_event_count: 78
+        total_reward: 252.3469
+
+  Window summary:
+    attempts 1-15:
+      avg_best_percent: 27.054
+      max_best_percent: 40.673
+      clears: 0
+    attempts 16-30:
+      avg_best_percent: 35.556
+      max_best_percent: 51.988
+      clears: 0
+    attempts 136-150:
+      avg_best_percent: 38.845
+      max_best_percent: 100.0
+      clears: 2
+
+Deterministic checkpoint evaluation:
+  Command:
+    python scripts/run_live_rl_practice_geode.py
+      --level-id manual_live_dqn_topplayer_cuda_eval_final
+      --algorithm dqn
+      --profile TopPlayer
+      --device cuda
+      --hidden-size 64
+      --attempts 5
+      --max-steps 1000
+      --load-checkpoint artifacts/live_dqn_topplayer_cuda_train_150_final.pt
+      --deterministic-actions
+      --epsilon-start 0
+      --epsilon-end 0
+      --dqn-warmup-steps 100000
+      --compact-output
+
+  Artifact:
+    artifacts/live_rl_practice_20260626_114220
+
+  Result:
+    clears: 0 / 5
+    best_percent: 31.3936 in every attempt
+    observed policy behavior:
+      mostly desired hold, one initial press, almost no releases
+
+Interpretation:
+  The long DQN run did produce real clears through the TopPlayer human model on
+  the ship fixture, but the final greedy DQN policy is not stable yet. The two
+  clears likely depended on epsilon-greedy exploration or transient Q-values,
+  not a robust deterministic feedback controller. For the next training pass,
+  save best-by-progress checkpoints during training and evaluate those, or move
+  to an actor-critic/stochastic policy for the ship fixture.
+```
+
 ---
 
 ## 11. Prompt For Next Agent Work
@@ -1567,16 +1809,19 @@ Current state:
   - LiveActionHistory features
   - A2C-style actor/value update
   - death-local feedback stats
+  - `TinyLiveDQNNetwork`
+  - replay-buffer DQN baseline
 - Guarded live Geode smoke driver exists:
   - `scripts/run_live_rl_practice_geode.py`
   - default --algorithm a2c
+  - --algorithm dqn is available as a value-based diagnostic baseline
   - --algorithm reinforce remains available as a smoke fallback
 - Desired button-state adapter is implemented:
   - policy outputs desired idle/hold
   - `ButtonStateIntentAdapter` converts intended state transitions to
     no_op/press/release
 - Latest full pytest passed:
-  - 141 tests collected
+  - full pytest passed after DQN baseline wiring
 - artifacts/ is ignored and must remain local-only.
 
 Direction:

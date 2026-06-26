@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import gd_rl.live_env as live_env_module
 from gd_env import BridgeDiagnostic, BridgeObservation
 from gd_human_model import Event, HumanProfile
 from gd_rl import IntendedAction, LivePracticeEnv, LivePracticeEnvConfig
@@ -172,6 +173,103 @@ def test_live_env_returns_delayed_policy_observation_and_persists_terminal_attem
     assert summary["cleared"] is True
     assert summary["metadata"]["executor"] == "geode_live_step"
     assert diagnostics["executor"] == "geode_live_step"
+
+
+def test_live_env_only_waits_after_clear_not_death(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(live_env_module.time, "sleep", sleeps.append)
+
+    death_client = FakeLiveGeodeClient(
+        [
+            _observation(0, percent=0.0),
+            _observation(1, percent=20.0, dead=True),
+        ]
+    )
+    death_env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="death_fixture",
+            output_dir=tmp_path / "death",
+            post_terminal_delay_seconds=5.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: death_client,
+    )
+    with death_env:
+        death_env.reset(attempt_index=1)
+        death_step = death_env.step(IntendedAction.no_op(0))
+
+    assert death_step.done is True
+    assert death_step.info["attempt_result"]["cleared"] is False
+    assert sleeps == []
+
+    clear_client = FakeLiveGeodeClient(
+        [
+            _observation(0, percent=0.0),
+            _observation(1, percent=100.0, completed=True),
+        ]
+    )
+    clear_env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="clear_fixture",
+            output_dir=tmp_path / "clear",
+            post_terminal_delay_seconds=5.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: clear_client,
+    )
+    with clear_env:
+        clear_env.reset(attempt_index=1)
+        clear_step = clear_env.step(IntendedAction.no_op(0))
+
+    assert clear_step.done is True
+    assert clear_step.info["attempt_result"]["cleared"] is True
+    assert sleeps == [5.0]
+
+
+def test_live_env_treats_tick_rewind_as_terminal_death(tmp_path: Path) -> None:
+    fake_client = FakeLiveGeodeClient(
+        [
+            _observation(0, percent=0.0),
+            _observation(1, percent=10.0),
+            _observation(0, percent=0.0),
+        ]
+    )
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="rewind_fixture",
+            output_dir=tmp_path,
+            max_steps=5,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+
+    with env:
+        env.reset(attempt_index=1)
+        first_step = env.step(IntendedAction.no_op(0))
+        rewind_step = env.step(IntendedAction.no_op(1))
+
+    attempt_dir = tmp_path / "attempt_001"
+    trace = load_trace_jsonl(attempt_dir / "trace.jsonl")
+    diagnostics = json.loads(
+        (attempt_dir / "geode_diagnostics.json").read_text(encoding="utf-8")
+    )
+
+    assert first_step.done is False
+    assert rewind_step.done is True
+    assert rewind_step.observation.latest.tick == 1
+    assert rewind_step.observation.latest.dead is True
+    assert rewind_step.info["attempt_result"]["death_tick"] == 1
+    assert [row.tick for row in trace] == [0, 1]
+    assert trace[-1].dead is True
+    assert trace[-1].death_reason == "tick_rewind_reset"
+    assert any(
+        diagnostic["kind"] == "live_tick_rewind_terminal"
+        for diagnostic in diagnostics["diagnostics"]
+    )
 
 
 def test_live_env_start_guard_rejects_wrong_start(tmp_path: Path) -> None:

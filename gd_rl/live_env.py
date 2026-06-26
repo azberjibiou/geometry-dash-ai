@@ -305,15 +305,33 @@ class LivePracticeEnv:
             self._executed_events.append(event)
 
         next_observation = client.receive_observation(diagnostics=self._diagnostics)
-        if next_observation.tick <= current.tick:
-            raise ValueError(
-                "live observations must advance strictly between env steps: "
-                f"{next_observation.tick} <= {current.tick}"
+        tick_rewound = next_observation.tick <= current.tick
+        if tick_rewound:
+            self._diagnostics.append(
+                BridgeDiagnostic(
+                    kind="live_tick_rewind_terminal",
+                    tick=current.tick,
+                    data={
+                        "current_tick": current.tick,
+                        "rewound_tick": next_observation.tick,
+                        "current_percent": current.percent,
+                        "rewound_percent": next_observation.percent,
+                    },
+                )
+            )
+            next_observation = replace(
+                current,
+                dead=True,
+                completed=False,
+                death_reason=current.death_reason or "tick_rewind_reset",
             )
 
         self._step_count += 1
         self._current_observation = next_observation
-        self._record_observation(next_observation)
+        if tick_rewound:
+            self._replace_last_observation_record(next_observation)
+        else:
+            self._record_observation(next_observation)
 
         reward_terms = self._compute_step_reward(
             current=current,
@@ -354,7 +372,11 @@ class LivePracticeEnv:
         )
 
         if self._done:
-            if self.config.post_terminal_delay_seconds > 0.0:
+            terminal_cleared = _is_clear_observation(
+                next_observation,
+                success_percent=self.config.success_percent,
+            )
+            if terminal_cleared and self.config.post_terminal_delay_seconds > 0.0:
                 time.sleep(self.config.post_terminal_delay_seconds)
             result = self.save_attempt()
             info["attempt_result"] = result.to_dict()
@@ -533,6 +555,16 @@ class LivePracticeEnv:
         )
         self._completed_seen = self._completed_seen or observation.completed
         human.observe(observation.tick, observation)
+
+    def _replace_last_observation_record(self, observation: BridgeObservation) -> None:
+        if not self._rows:
+            raise RuntimeError("cannot replace missing trace row")
+        self._rows[-1] = observation.to_trace_row(
+            fps=self.config.fps,
+            cbf=self.config.cbf,
+            physics_bypass=self.config.physics_bypass,
+        )
+        self._completed_seen = self._completed_seen or observation.completed
 
     def _make_live_observation(
         self,
