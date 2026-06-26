@@ -952,29 +952,143 @@ Next direction:
   incremental rewards and terminal outcomes.
 ```
 
-### Phase D - Level Practice Memory
+### Phase D - Closed-Loop Practice Learner
 
 Goal:
 
-Make successful sections persist as level-specific memory.
+Move the live learner away from exact timing discovery and toward feedback
+control. The policy should learn to correct continuously from delayed compact
+observations while its intended actions pass through the stochastic human
+model.
+
+Core direction:
+
+```text
+This is not a "find the 192 tick jump" problem.
+
+Because every policy output is filtered through visual delay, motor delay,
+jitter, drops, and accumulated state error, exact tick targets are not stable
+control primitives. This becomes most obvious in ship/flying sections, where
+survival depends on continuously correcting y-position, velocity, and current
+input state rather than replaying fixed press/release timestamps.
+```
+
+The next learner should therefore be a small closed-loop controller:
+
+- policy output remains desired input state: idle/hold,
+- desired state transitions are converted to intended press/release edges,
+- intended edges always pass through the online human model,
+- observations stay compact at first: percent/x/y/velocity/mode/gravity/input,
+- recent intended state and/or action history should be available to the
+  learner so it can reason about delayed execution,
+- death feedback should localize failed state/action regions, not produce exact
+  replacement click ticks.
+
+Recommended algorithm direction:
+
+```text
+Keep the current REINFORCE path as a smoke scaffold.
+Do not optimize it as the serious learner.
+
+Implement the next learner as a minimal actor-critic/A2C-style loop before
+considering PPO. The value head should help use death-local feedback and reduce
+the very high variance of whole-episode REINFORCE.
+```
+
+Smallest meaningful experiment:
+
+```text
+Use a tiny local/offline fixture that rewards closed-loop correction.
+
+Best target:
+  a short ship corridor or flying-control level where survival requires
+  maintaining a y-band under humanized input noise.
+
+Fallback:
+  a simple existing local/offline fixture can be used for smoke, but it should
+  not be treated as proof that the closed-loop direction works unless feedback
+  correction matters.
+```
 
 Tasks:
 
-1. Store event windows with confidence.
-2. Store death histograms and section stats.
-3. Update windows from successful clears and near-miss/death context.
-4. Combine policy output with memory at runtime.
-5. Evaluate whether memory improves post-practice consistency under human
-   noise.
+1. Define or select a small local/offline closed-loop control fixture,
+   preferably an early ship corridor.
+2. Keep no-input, random desired-state, and simple fixed-control policies as
+   baselines.
+3. Add a minimal actor-critic learner around `LivePracticeEnv`.
+4. Keep action space as desired idle/hold and reuse `ButtonStateIntentAdapter`.
+5. Add recent intended-state/action-history features, or prepare for a tiny
+   recurrent state later.
+6. Add death-local credit assignment over the preceding observation/action
+   window. This may weight recent advantages or penalties, but it must not
+   write exact tick corrections.
+7. Add only generic regularization if needed, such as decision stride,
+   action-repeat, entropy tuning, or input-rate penalties. Do not add
+   level-specific cooldown scripts.
+8. Evaluate with changed human seeds after training to check whether the policy
+   is correcting feedback error rather than memorizing one noisy execution.
 
 Success criterion:
 
 ```text
-The agent improves on the same level through practice without reducing to a
-single exact replay macro.
+The agent improves survival, progress, or clear rate on the same local/offline
+level under stochastic human execution without reducing to a single exact
+replay macro or exact-tick timing table.
 ```
 
-### Phase E - Optional Imitation Bootstrap
+Failure modes to watch:
+
+```text
+The policy learns a fixed timestamp-like pattern that fails when the human seed
+changes.
+
+The policy collapses to rapid random toggling or permanently held input.
+
+Memory or handcrafted logic starts overriding the policy with level-specific
+press/release commands.
+
+Learning only improves on jump timing fixtures and does not transfer to a
+fixture where closed-loop correction is actually required.
+```
+
+### Phase E - State-Space Practice Memory
+
+Goal:
+
+Persist level-specific practice knowledge as state-space diagnostics and soft
+guidance, not as exact event timings.
+
+The memory should answer questions like:
+
+```text
+Where does the agent die in observation/state space?
+Which y/y_vel/input-state regions are recoverable?
+Which sections are stable under different human seeds?
+Does the policy recover after humanized execution drifts from intended input?
+```
+
+Tasks:
+
+1. Store death clusters by compact state features, section, mode, and human
+   profile/seed.
+2. Store survival bands or successful state distributions for closed-loop
+   sections.
+3. Track intended state, executed input, pending human events, and observed
+   input transitions around death windows.
+4. Keep memory passive at first: summaries, diagnostics, plots/tables, and
+   optional learner features.
+5. Only later consider soft policy priors from memory. Do not let memory issue
+   direct press/release overrides.
+
+Success criterion:
+
+```text
+Practice memory helps explain and eventually guide closed-loop improvement
+without becoming a macro, timing-window table, or handcrafted controller.
+```
+
+### Phase F - Optional Imitation Bootstrap
 
 Goal:
 
@@ -982,9 +1096,9 @@ Use existing imitation tools only when they help RL practice.
 
 Allowed uses:
 
-- initialize event windows,
+- initialize observation encoders or policy heads,
 - pretrain a policy head,
-- compare learned windows against a demonstration,
+- compare learned closed-loop behavior against a demonstration,
 - test event decoders.
 
 Success criterion:
@@ -1012,6 +1126,10 @@ intended_event_count
 executed_event_count
 dropped_event_count
 timing_delta_distribution
+desired_input_state_counts
+emitted_intent_counts
+observed_input_transition_count
+pending_not_dispatched_count
 ```
 
 Practice metrics:
@@ -1026,6 +1144,10 @@ death_histogram_over_time
 section_success_rate_over_time
 post_practice_clear_rate
 memory_confidence_by_section
+death_state_cluster_over_time
+survival_state_band_over_time
+human_seed_eval_delta
+closed_loop_recovery_rate
 ```
 
 The key early question:
@@ -1033,6 +1155,14 @@ The key early question:
 ```text
 Does repeated practice on the same local/offline level improve progress or
 reward under the same stochastic human profile?
+```
+
+For Phase D, the sharper question is:
+
+```text
+When humanized execution creates timing and state error, does the policy use
+new observations to correct its next intended button state, or is it merely
+rediscovering a brittle fixed timing pattern?
 ```
 
 ---
@@ -1058,28 +1188,26 @@ logging, or update behavior testable.
 Immediate next task:
 
 ```text
-Start the post-CEM RL pivot: build the first live step-based practice
-environment for observation-conditioned RL.
+Start Phase D: turn the live step learner into a closed-loop practice
+controller rather than a timing-search or macro-replay system.
 ```
 
 Recommended order:
 
-1. Inspect the Geode bridge protocol and determine what live input-control
-   commands already exist or need to be added.
-2. Add a step environment abstraction, such as `LivePracticeEnv`, that exposes
-   reset/step semantics for one local/offline level.
-3. Keep the policy boundary as intent, not direct game input.
-4. Add an online human-action wrapper with delay/noise/drop queues for per-step
-   intended actions.
-5. Start with compact observations from bridge state rather than screenshots:
-   tick, percent, x/y, velocity, input state, dead/clear flags, and recent
-   progress.
-6. Start with a tiny action space: keep/no-op, intend press, intend release,
-   or a short intended tap action.
-7. Add fake-client or synthetic tests so the step loop runs without Geometry
-   Dash.
-8. Only after the step environment is reliable, add a minimal neural learner
-   such as REINFORCE/A2C/PPO on the local/offline fixture.
+1. Preserve `LivePracticeEnv` as the policy-intent-to-humanized-input boundary.
+2. Keep the desired idle/hold input state action space introduced by
+   `ButtonStateIntentAdapter`.
+3. Add the smallest actor-critic/A2C-style learner that can use a value head
+   and death-local feedback.
+4. Include recent intended state/action history so the policy can reason about
+   delayed observations and delayed execution.
+5. Select or create a tiny local/offline closed-loop fixture, preferably a ship
+   corridor, where fixed tick timing is not the right abstraction.
+6. Compare against no-input, random desired-state, and simple fixed-control
+   baselines.
+7. Evaluate with changed human seeds to catch brittle timing memorization.
+8. Keep state-space practice memory passive until closed-loop learning is
+   demonstrated.
 
 Live step environment implementation update:
 
@@ -1254,36 +1382,36 @@ Next recommended implementation step:
   untrained no_op/press/release sampler produces dense contradictory intents.
 ```
 
-Desired button-state adapter implementation update:
+Desired input-state adapter implementation update:
 
 ```text
 Implemented:
   gd_rl/live_learner.py
-    - TinyLivePolicyNetwork now outputs desired button states:
-        up, down
+    - TinyLivePolicyNetwork now outputs desired input states:
+        idle, hold
       instead of directly sampling no_op/press/release events.
-    - Added ButtonStateIntentAdapter, which tracks intended button state and
+    - Added ButtonStateIntentAdapter, which tracks intended input state and
       converts desired state transitions into edge intents:
-        intended up -> desired down: press
-        intended down -> desired down: no_op
-        intended down -> desired up: release
-        intended up -> desired up: no_op
+        intended idle -> desired hold: press
+        intended hold -> desired hold: no_op
+        intended hold -> desired idle: release
+        intended idle -> desired idle: no_op
     - The adapter is intentionally based on intended state, not executed bridge
       input state, so human visual/motor delay does not cause repeated press or
       release intents while a humanized event is pending.
     - ReinforceAttemptSummary now reports both:
-        action_counts: desired up/down counts
+        action_counts: desired idle/hold counts
         intent_counts: emitted no_op/press/release intent counts
-    - Training summary policy metadata now reports desired_button_states and
+    - Training summary policy metadata now reports desired_input_states and
       intent_action_kinds separately.
 
   gd_rl/__init__.py
-    - exported ButtonStateIntentAdapter and DESIRED_BUTTON_STATES.
+    - exported ButtonStateIntentAdapter and DESIRED_INPUT_STATES.
 
   tests/test_live_learner.py
-    - added fake/unit coverage proving repeated desired down emits one press
+    - added fake/unit coverage proving repeated desired hold emits one press
       then no_op, independent of delayed executed input.
-    - updated the one-step reward learner test to train toward desired down
+    - updated the one-step reward learner test to train toward desired hold
       and verify the emitted intent is press.
 
 Verification:
@@ -1327,7 +1455,7 @@ Successful desired-state live smoke:
     row_count: 207
     total_reward: 32.0423
     reset_attempts: 1
-    desired action counts: up 111, down 95
+    desired action counts: idle 111, hold 95
     emitted intent counts: no_op 107, press 50, release 49
     intended_event_count: 99
     executed_event_count: 93
@@ -1349,6 +1477,63 @@ Next recommended implementation step:
   impossible duplicate edges but still allows rapid random toggling.
 ```
 
+Minimal actor-critic/A2C implementation update:
+
+```text
+Implemented:
+  gd_rl/live_learner.py
+    - ActorCriticConfig for the first Phase D A2C-style learner.
+    - LiveActionHistory and history features for recent desired button state
+      plus emitted intent kind, so delayed observation/execution context is
+      available to the policy.
+    - TinyLiveActorCriticNetwork with a shared compact-observation encoder,
+      desired idle/hold actor head, and scalar value head.
+    - run_actor_critic_attempt(...) and run_actor_critic_training(...).
+    - configurable death-local feedback that weights the recent terminal
+      death window in reward/advantage space and persists death-local stats,
+      without writing exact replacement click ticks.
+    - optional generic input-rate penalty for emitted press/release intents.
+
+  scripts/run_live_rl_practice_geode.py
+    - added --algorithm {a2c,reinforce}; default is now a2c.
+    - keeps tiny guarded live defaults:
+        attempts=1
+        max_steps=600
+        device=cpu
+        no checkpoint writing
+    - added A2C flags:
+        --value-loss-weight
+        --normalize-advantages
+        --history-length
+        --death-local-window
+        --death-local-penalty
+        --input-rate-penalty
+    - REINFORCE remains available as a smoke fallback with
+      --algorithm reinforce.
+
+  gd_rl/__init__.py
+    - exported actor-critic config, network, history, encoder, and training
+      helpers.
+
+  tests/
+    - fake-client coverage for A2C policy update, history feature encoding,
+      death-local feedback stats, and CLI A2C wiring.
+
+Verification:
+  python -m pytest -q tests/test_live_learner.py
+  python -m pytest -q tests/test_run_live_rl_practice_geode.py
+  python scripts/run_live_rl_practice_geode.py --help
+  python -m pytest -q
+  python -m pytest --collect-only
+  result: 141 tests collected; full pytest passed
+
+Next recommended implementation step:
+  Run a guarded one-attempt local/offline A2C smoke. Prefer a tiny ship or
+  flying-control fixture where closed-loop y/y_vel/input correction matters.
+  If only the existing spike fixture is available, treat the run as plumbing
+  validation only, not proof of closed-loop learning.
+```
+
 ---
 
 ## 11. Prompt For Next Agent Work
@@ -1357,45 +1542,84 @@ Next recommended implementation step:
 We are in the geometry_dash_ai repo. Continue from agent_plan.md.
 
 Main objective:
-Close out Phase C as a diagnostic and start the next phase: build the first
-live observation-conditioned RL practice environment. The goal is to move
-beyond queued whole-macro candidates toward per-step intended actions that are
-filtered through the human mock model before they reach Geometry Dash.
+Validate and iterate on the first Phase D closed-loop actor-critic learner.
+The goal is no longer to discover exact press/release ticks. The goal is to
+learn an observation-conditioned feedback controller that can correct for
+humanized execution error over time.
 
 Current state:
 - Phase A RL practice skeleton is implemented and pushed.
 - Live Geode queued replay executor is implemented and pushed.
 - Phase B reward sanity baselines passed on the local/offline triple-spike
   fixture.
-- Phase C CEM timing search diagnostic is implemented and tested:
-  - `gd_rl/timing_search.py`
-  - `scripts/run_rl_timing_search_geode.py`
-  - timing window examples under `examples/timing_windows/`
-- Phase C live smoke on the harder local/offline fixture
-  (triple spike plus two jump orbs) improved progress from:
-  - triple-only probe best_percent: 54.3307
-  - memory-seeded CEM best recheck: 62.1212
-- CEM is not the final direction and should not be further optimized except as
-  a debugging baseline.
-- pytest previously passed: 129 passed.
+- Phase C CEM timing search is closed as diagnostic only. Do not continue
+  optimizing CEM timing windows.
+- Live step env exists:
+  - `gd_rl/live_env.py`
+  - `LivePracticeEnv.reset/step/save_attempt`
+  - policy intent -> online HumanizedAgent -> executed input -> Geode bridge
+- Tiny live neural learner exists:
+  - `gd_rl/live_learner.py`
+  - compact observation encoder
+  - `TinyLivePolicyNetwork`
+  - REINFORCE loop
+  - `TinyLiveActorCriticNetwork`
+  - LiveActionHistory features
+  - A2C-style actor/value update
+  - death-local feedback stats
+- Guarded live Geode smoke driver exists:
+  - `scripts/run_live_rl_practice_geode.py`
+  - default --algorithm a2c
+  - --algorithm reinforce remains available as a smoke fallback
+- Desired button-state adapter is implemented:
+  - policy outputs desired idle/hold
+  - `ButtonStateIntentAdapter` converts intended state transitions to
+    no_op/press/release
+- Latest full pytest passed:
+  - 141 tests collected
 - artifacts/ is ignored and must remain local-only.
 
+Direction:
+- The agent is a level-specific practice controller, not a timing-table or
+  macro-replay agent.
+- Exact ticks such as "press at 192" are not stable primitives because the
+  human model introduces visual delay, motor delay, jitter, drops, and
+  accumulated state error.
+- This matters most in ship/flying sections, where survival depends on
+  continuous correction of y-position, velocity, input state, and delayed
+  observations.
+- Practice memory should start as state-space diagnostics, not as direct
+  press/release overrides.
+
 Task:
-Implement the first live step-based practice environment for real RL:
-- Inspect existing Geode bridge capabilities and identify whether live
-  press/release input commands exist or need to be added.
-- Add a `LivePracticeEnv` or equivalent reset/step abstraction.
-- Each step should consume an observation, accept a policy intent, pass that
-  intent through an online human model, apply only the executed input to the
-  live local/offline level, and return next observation, reward, done, and info.
-- Persist traces and summaries in the same spirit as the queued practice
-  runner, but do not require a full intended macro up front.
-- Add tests with fake clients or synthetic step traces so the environment is
-  testable without Geometry Dash.
-- If bridge support is missing, implement the smallest bridge/protocol addition
-  needed for live local input stepping, with fake-client tests first.
-- Do not start a large training run yet. Once the step environment is reliable,
-  propose the smallest neural RL learner to connect next.
+Run the smallest guarded live A2C validation and prepare the closed-loop
+experiment path:
+- Keep policy output as desired input state only: idle/hold.
+- Keep `ButtonStateIntentAdapter`.
+- All emitted press/release intent must still pass through the online
+  `HumanizedAgent` inside `LivePracticeEnv`.
+- Keep compact bridge observations; do not introduce screenshot RL.
+- Use `scripts/run_live_rl_practice_geode.py` with default `--algorithm a2c`
+  for one-attempt local/offline smoke validation.
+- Prefer a tiny local/offline ship corridor or flying-control fixture where
+  y/y_vel/input correction matters.
+- If that fixture is not ready, only run a smoke on the existing local/offline
+  fixture and do not claim closed-loop learning success from it.
+- Add no-input, random desired-state, and simple fixed-control baselines for
+  the closed-loop fixture before larger training.
+- Evaluate with changed human seeds before claiming learning success.
+- Consider only generic regularization if live A2C toggles too quickly:
+  entropy tuning, input-rate penalty, decision stride, or action repeat.
+  Do not add level-specific cooldown scripts.
+
+Smallest live experiment after tests pass:
+- Prefer a tiny local/offline ship corridor or flying-control fixture where
+  closed-loop correction matters.
+- If that fixture is not ready, only run a smoke on the existing local/offline
+  fixture and do not treat it as proof of the closed-loop direction.
+- Compare against no-input, random desired-state, and simple fixed-control
+  baselines.
+- Evaluate with changed human seeds before claiming learning success.
 
 Constraints:
 - RL policy output is intent, not direct game input.
@@ -1408,4 +1632,6 @@ Constraints:
 - Keep tests runnable without Geometry Dash.
 - Do not keep expanding CEM timing search unless a narrow diagnostic requires
   it.
+- Do not implement exact-tick practice memory or macro replay as the next
+  learning architecture.
 ```

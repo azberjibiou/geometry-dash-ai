@@ -12,8 +12,8 @@ from gd_rl.live_env import LivePracticeObservation, LiveStepResult
 from gd_rl.results import AttemptResult
 
 ACTION_KINDS: tuple[ActionKind, ...] = ("no_op", "press", "release")
-DesiredButtonState = Literal["up", "down"]
-DESIRED_BUTTON_STATES: tuple[DesiredButtonState, ...] = ("up", "down")
+DesiredInputState = Literal["idle", "hold"]
+DESIRED_INPUT_STATES: tuple[DesiredInputState, ...] = ("idle", "hold")
 MODE_ORDER = (
     "cube",
     "ship",
@@ -104,9 +104,50 @@ class ReinforceConfig:
             raise LiveLearnerError("max_grad_norm must be positive or None")
 
 
+@dataclass(frozen=True, slots=True)
+class ActorCriticConfig:
+    """Small actor-critic update loop for closed-loop live practice."""
+
+    attempts: int = 1
+    gamma: float = 0.99
+    learning_rate: float = 1e-3
+    entropy_bonus: float = 0.01
+    value_loss_weight: float = 0.5
+    max_grad_norm: float | None = 1.0
+    normalize_advantages: bool = False
+    deterministic_actions: bool = False
+    seed: int = 0
+    history_length: int = 4
+    death_local_window: int = 24
+    death_local_penalty: float = 1.0
+    input_rate_penalty: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.attempts <= 0:
+            raise LiveLearnerError("attempts must be positive")
+        if not 0.0 <= self.gamma <= 1.0:
+            raise LiveLearnerError("gamma must be between 0 and 1")
+        if self.learning_rate <= 0.0:
+            raise LiveLearnerError("learning_rate must be positive")
+        if self.entropy_bonus < 0.0:
+            raise LiveLearnerError("entropy_bonus must be non-negative")
+        if self.value_loss_weight < 0.0:
+            raise LiveLearnerError("value_loss_weight must be non-negative")
+        if self.max_grad_norm is not None and self.max_grad_norm <= 0.0:
+            raise LiveLearnerError("max_grad_norm must be positive or None")
+        if self.history_length < 0:
+            raise LiveLearnerError("history_length must be non-negative")
+        if self.death_local_window < 0:
+            raise LiveLearnerError("death_local_window must be non-negative")
+        if self.death_local_penalty < 0.0:
+            raise LiveLearnerError("death_local_penalty must be non-negative")
+        if self.input_rate_penalty < 0.0:
+            raise LiveLearnerError("input_rate_penalty must be non-negative")
+
+
 @dataclass(slots=True)
 class ButtonStateIntentAdapter:
-    """Map desired button states to intended press/release edges.
+    """Map desired idle/hold states to intended press/release edges.
 
     The adapter tracks intended button state instead of live executed input.
     That keeps visual and motor delay from causing repeated press/release
@@ -124,25 +165,82 @@ class ButtonStateIntentAdapter:
 
     def intent_for_desired_state(
         self,
-        desired_button_state: DesiredButtonState,
+        desired_input_state: DesiredInputState,
         *,
         tick: int,
     ) -> IntendedAction:
         """Return the edge needed to reach the desired intended state."""
 
-        if desired_button_state == "down":
+        if desired_input_state == "hold":
             if self.intended_input_down:
                 return IntendedAction.no_op(tick)
             self.intended_input_down = True
             return IntendedAction.press(tick)
-        if desired_button_state == "up":
+        if desired_input_state == "idle":
             if not self.intended_input_down:
                 return IntendedAction.no_op(tick)
             self.intended_input_down = False
             return IntendedAction.release(tick)
-        raise LiveLearnerError(
-            f"unknown desired button state {desired_button_state!r}"
+        raise LiveLearnerError(f"unknown desired input state {desired_input_state!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class LiveActionHistoryEntry:
+    """One recent intended decision for compact delay-aware features."""
+
+    desired_input_state: DesiredInputState
+    intent_kind: ActionKind
+
+
+@dataclass(slots=True)
+class LiveActionHistory:
+    """Fixed-length intended action history exposed to closed-loop learners."""
+
+    length: int = 4
+    entries: list[LiveActionHistoryEntry] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.length < 0:
+            raise LiveLearnerError("history length must be non-negative")
+
+    def reset(self) -> None:
+        self.entries.clear()
+
+    def append(
+        self,
+        *,
+        desired_input_state: DesiredInputState,
+        intent_kind: ActionKind,
+    ) -> None:
+        if self.length == 0:
+            return
+        self.entries.append(
+            LiveActionHistoryEntry(
+                desired_input_state=desired_input_state,
+                intent_kind=intent_kind,
+            )
         )
+        if len(self.entries) > self.length:
+            del self.entries[: len(self.entries) - self.length]
+
+    def features(self) -> list[float]:
+        if self.length == 0:
+            return []
+        padded: list[LiveActionHistoryEntry | None] = [None] * (
+            self.length - len(self.entries)
+        )
+        padded.extend(self.entries)
+        features: list[float] = []
+        for entry in padded:
+            if entry is None:
+                features.extend([0.0] * live_action_history_entry_feature_dim())
+                continue
+            features.append(1.0 if entry.desired_input_state == "hold" else 0.0)
+            features.extend(
+                1.0 if entry.intent_kind == kind else 0.0
+                for kind in ACTION_KINDS
+            )
+        return features
 
 
 @dataclass(slots=True)
@@ -151,8 +249,8 @@ class NeuralActionDecision:
 
     intent: IntendedAction
     action_index: int
-    desired_button_state: DesiredButtonState
-    desired_input_down: bool
+    desired_input_state: DesiredInputState
+    desired_holding: bool
     probability: float
     logits: list[float]
     features: list[float]
@@ -163,10 +261,39 @@ class NeuralActionDecision:
         return {
             "intent": asdict(self.intent),
             "action_index": self.action_index,
-            "desired_button_state": self.desired_button_state,
-            "desired_input_down": self.desired_input_down,
+            "desired_input_state": self.desired_input_state,
+            "desired_holding": self.desired_holding,
             "probability": self.probability,
             "logits": list(self.logits),
+            "features": list(self.features),
+        }
+
+
+@dataclass(slots=True)
+class ActorCriticActionDecision:
+    """One actor-critic decision plus policy/value tensors."""
+
+    intent: IntendedAction
+    action_index: int
+    desired_input_state: DesiredInputState
+    desired_holding: bool
+    probability: float
+    logits: list[float]
+    value: float
+    features: list[float]
+    log_probability_tensor: Any = field(repr=False)
+    entropy_tensor: Any = field(repr=False)
+    value_tensor: Any = field(repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "intent": asdict(self.intent),
+            "action_index": self.action_index,
+            "desired_input_state": self.desired_input_state,
+            "desired_holding": self.desired_holding,
+            "probability": self.probability,
+            "logits": list(self.logits),
+            "value": self.value,
             "features": list(self.features),
         }
 
@@ -190,10 +317,52 @@ class ReinforceAttemptSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class ActorCriticAttemptSummary:
+    """Training metrics for one A2C-style live attempt."""
+
+    attempt_index: int
+    step_count: int
+    total_step_reward: float
+    total_training_reward: float
+    loss: float
+    policy_loss: float
+    value_loss: float
+    entropy: float
+    mean_value: float
+    advantage_stats: dict[str, float]
+    action_counts: dict[str, int]
+    intent_counts: dict[str, int]
+    death_local_stats: dict[str, Any]
+    attempt_result: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class ReinforceTrainingSummary:
     """Aggregate metrics for a short live REINFORCE run."""
 
     attempts: list[ReinforceAttemptSummary]
+    config: dict[str, Any]
+
+    @property
+    def attempt_count(self) -> int:
+        return len(self.attempts)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempt_count": self.attempt_count,
+            "config": dict(self.config),
+            "attempts": [attempt.to_dict() for attempt in self.attempts],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ActorCriticTrainingSummary:
+    """Aggregate metrics for a short live actor-critic run."""
+
+    attempts: list[ActorCriticAttemptSummary]
     config: dict[str, Any]
 
     @property
@@ -221,7 +390,7 @@ class TinyLivePolicyNetwork:
         if input_dim <= 0:
             raise LiveLearnerError("input_dim must be positive")
         self.input_dim = input_dim
-        self.output_dim = len(DESIRED_BUTTON_STATES)
+        self.output_dim = len(DESIRED_INPUT_STATES)
         self.torch = _import_torch()
         _set_seed(self.torch, self.config.seed)
         self.device = self.torch.device(self.config.device)
@@ -276,10 +445,10 @@ class TinyLivePolicyNetwork:
         else:
             action_index_tensor = distribution.sample()
         action_index = int(action_index_tensor.detach().cpu().item())
-        desired_button_state = DESIRED_BUTTON_STATES[action_index]
+        desired_input_state = DESIRED_INPUT_STATES[action_index]
         adapter = intent_adapter or _adapter_from_observation(observation)
         intent = adapter.intent_for_desired_state(
-            desired_button_state,
+            desired_input_state,
             tick=observation.tick,
         )
         probability = float(
@@ -288,8 +457,8 @@ class TinyLivePolicyNetwork:
         return NeuralActionDecision(
             intent=intent,
             action_index=action_index,
-            desired_button_state=desired_button_state,
-            desired_input_down=desired_button_state == "down",
+            desired_input_state=desired_input_state,
+            desired_holding=desired_input_state == "hold",
             probability=probability,
             logits=[float(value) for value in logits.detach().cpu().tolist()],
             features=features,
@@ -299,6 +468,144 @@ class TinyLivePolicyNetwork:
 
     def make_optimizer(self, config: ReinforceConfig) -> Any:
         return self.torch.optim.Adam(self.model.parameters(), lr=config.learning_rate)
+
+
+class TinyLiveActorCriticNetwork:
+    """Small shared MLP with actor and value heads for desired button state."""
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        config: NeuralPolicyConfig | None = None,
+        history_length: int = 4,
+    ) -> None:
+        self.config = config or NeuralPolicyConfig()
+        if input_dim <= 0:
+            raise LiveLearnerError("input_dim must be positive")
+        if history_length < 0:
+            raise LiveLearnerError("history_length must be non-negative")
+        self.input_dim = input_dim
+        self.history_length = history_length
+        self.output_dim = len(DESIRED_INPUT_STATES)
+        self.torch = _import_torch()
+        _set_seed(self.torch, self.config.seed)
+        self.device = self.torch.device(self.config.device)
+        self.shared = self.torch.nn.Sequential(
+            self.torch.nn.Linear(input_dim, self.config.hidden_size),
+            self.torch.nn.Tanh(),
+        ).to(self.device)
+        self.actor_head = self.torch.nn.Linear(
+            self.config.hidden_size,
+            self.output_dim,
+        ).to(self.device)
+        self.value_head = self.torch.nn.Linear(self.config.hidden_size, 1).to(
+            self.device
+        )
+
+    @classmethod
+    def from_encoder_config(
+        cls,
+        config: NeuralPolicyConfig | None = None,
+        *,
+        history_length: int = 4,
+    ) -> "TinyLiveActorCriticNetwork":
+        effective_config = config or NeuralPolicyConfig()
+        return cls(
+            input_dim=actor_critic_feature_dim(history_length),
+            config=effective_config,
+            history_length=history_length,
+        )
+
+    def forward_features(self, features: Sequence[float]) -> tuple[Any, Any]:
+        feature_tensor = self.torch.tensor(
+            list(features),
+            dtype=self.torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
+        hidden = self.shared(feature_tensor)
+        logits = self.actor_head(hidden).squeeze(0)
+        value = self.value_head(hidden).squeeze(0).squeeze(-1)
+        return logits, value
+
+    def logits_and_value(
+        self,
+        observation: LivePracticeObservation,
+        *,
+        history: LiveActionHistory | None = None,
+    ) -> tuple[Any, Any]:
+        features = encode_actor_critic_observation(
+            observation,
+            history=history,
+            history_length=self.history_length,
+            config=self.config.encoder,
+        )
+        return self.forward_features(features)
+
+    def action_probabilities(
+        self,
+        observation: LivePracticeObservation,
+        *,
+        history: LiveActionHistory | None = None,
+    ) -> list[float]:
+        with self.torch.no_grad():
+            logits, _value = self.logits_and_value(observation, history=history)
+            probabilities = self.torch.softmax(logits, dim=-1)
+        return [float(value) for value in probabilities.detach().cpu().tolist()]
+
+    def act(
+        self,
+        observation: LivePracticeObservation,
+        *,
+        intent_adapter: ButtonStateIntentAdapter | None = None,
+        history: LiveActionHistory | None = None,
+        deterministic: bool = False,
+    ) -> ActorCriticActionDecision:
+        features = encode_actor_critic_observation(
+            observation,
+            history=history,
+            history_length=self.history_length,
+            config=self.config.encoder,
+        )
+        logits, value_tensor = self.forward_features(features)
+        distribution = self.torch.distributions.Categorical(logits=logits)
+        if deterministic:
+            action_index_tensor = self.torch.argmax(logits, dim=-1)
+        else:
+            action_index_tensor = distribution.sample()
+        action_index = int(action_index_tensor.detach().cpu().item())
+        desired_input_state = DESIRED_INPUT_STATES[action_index]
+        adapter = intent_adapter or _adapter_from_observation(observation)
+        intent = adapter.intent_for_desired_state(
+            desired_input_state,
+            tick=observation.tick,
+        )
+        probability = float(
+            self.torch.softmax(logits, dim=-1)[action_index].detach().cpu().item()
+        )
+        return ActorCriticActionDecision(
+            intent=intent,
+            action_index=action_index,
+            desired_input_state=desired_input_state,
+            desired_holding=desired_input_state == "hold",
+            probability=probability,
+            logits=[float(value) for value in logits.detach().cpu().tolist()],
+            value=float(value_tensor.detach().cpu().item()),
+            features=features,
+            log_probability_tensor=distribution.log_prob(action_index_tensor),
+            entropy_tensor=distribution.entropy(),
+            value_tensor=value_tensor,
+        )
+
+    def make_optimizer(self, config: ActorCriticConfig) -> Any:
+        return self.torch.optim.Adam(
+            [
+                *self.shared.parameters(),
+                *self.actor_head.parameters(),
+                *self.value_head.parameters(),
+            ],
+            lr=config.learning_rate,
+        )
 
 
 def encode_live_observation(
@@ -338,6 +645,45 @@ def live_observation_feature_dim() -> int:
     return 12 + len(MODE_ORDER)
 
 
+def encode_actor_critic_observation(
+    observation: LivePracticeObservation,
+    *,
+    history: LiveActionHistory | None = None,
+    history_length: int = 4,
+    config: LiveObservationEncoderConfig | None = None,
+) -> list[float]:
+    """Encode delayed bridge observation plus recent intended action history."""
+
+    if history_length < 0:
+        raise LiveLearnerError("history_length must be non-negative")
+    base_features = encode_live_observation(observation, config=config)
+    if history is None:
+        history_features = [0.0] * live_action_history_feature_dim(history_length)
+    else:
+        if history.length != history_length:
+            raise LiveLearnerError(
+                "history length must match actor-critic encoder history_length"
+            )
+        history_features = history.features()
+    return [*base_features, *history_features]
+
+
+def live_action_history_entry_feature_dim() -> int:
+    return 1 + len(ACTION_KINDS)
+
+
+def live_action_history_feature_dim(history_length: int) -> int:
+    if history_length < 0:
+        raise LiveLearnerError("history_length must be non-negative")
+    return history_length * live_action_history_entry_feature_dim()
+
+
+def actor_critic_feature_dim(history_length: int = 4) -> int:
+    return live_observation_feature_dim() + live_action_history_feature_dim(
+        history_length
+    )
+
+
 def run_reinforce_attempt(
     env: LiveStepEnvLike,
     policy: TinyLivePolicyNetwork,
@@ -353,7 +699,7 @@ def run_reinforce_attempt(
     rewards: list[float] = []
     log_probs: list[Any] = []
     entropies: list[Any] = []
-    action_counts = {state: 0 for state in DESIRED_BUTTON_STATES}
+    action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
     intent_counts = {kind: 0 for kind in ACTION_KINDS}
     intent_adapter = ButtonStateIntentAdapter()
     intent_adapter.reset(observation)
@@ -365,7 +711,7 @@ def run_reinforce_attempt(
             intent_adapter=intent_adapter,
             deterministic=effective_config.deterministic_actions,
         )
-        action_counts[decision.desired_button_state] += 1
+        action_counts[decision.desired_input_state] += 1
         intent_counts[decision.intent.kind] += 1
         last_step = env.step(decision.intent)
         rewards.append(float(last_step.reward))
@@ -450,7 +796,7 @@ def run_reinforce_training(
             "policy": {
                 "input_dim": policy.input_dim,
                 "output_dim": policy.output_dim,
-                "desired_button_states": list(DESIRED_BUTTON_STATES),
+                "desired_input_states": list(DESIRED_INPUT_STATES),
                 "intent_action_kinds": list(ACTION_KINDS),
                 "hidden_size": policy.config.hidden_size,
                 "device": policy.config.device,
@@ -461,6 +807,368 @@ def run_reinforce_training(
     if summary_path is not None:
         _write_json(summary.to_dict(), Path(summary_path))
     return summary
+
+
+def run_actor_critic_attempt(
+    env: LiveStepEnvLike,
+    policy: TinyLiveActorCriticNetwork,
+    optimizer: Any,
+    *,
+    attempt_index: int,
+    config: ActorCriticConfig | None = None,
+) -> ActorCriticAttemptSummary:
+    """Run one live episode and apply one actor-critic update."""
+
+    effective_config = config or ActorCriticConfig()
+    observation = env.reset(attempt_index=attempt_index)
+    step_rewards: list[float] = []
+    training_rewards: list[float] = []
+    log_probs: list[Any] = []
+    entropies: list[Any] = []
+    values: list[Any] = []
+    trajectory_steps: list[dict[str, Any]] = []
+    action_counts = {state: 0 for state in DESIRED_INPUT_STATES}
+    intent_counts = {kind: 0 for kind in ACTION_KINDS}
+    intent_adapter = ButtonStateIntentAdapter()
+    intent_adapter.reset(observation)
+    history = LiveActionHistory(length=effective_config.history_length)
+    last_step: LiveStepResult | None = None
+
+    while True:
+        decision = policy.act(
+            observation,
+            intent_adapter=intent_adapter,
+            history=history,
+            deterministic=effective_config.deterministic_actions,
+        )
+        action_counts[decision.desired_input_state] += 1
+        intent_counts[decision.intent.kind] += 1
+        last_step = env.step(decision.intent)
+        base_reward = float(last_step.reward)
+        rate_penalty = (
+            -effective_config.input_rate_penalty
+            if decision.intent.kind != "no_op"
+            else 0.0
+        )
+        step_reward = base_reward + rate_penalty
+        step_rewards.append(base_reward)
+        training_rewards.append(step_reward)
+        log_probs.append(decision.log_probability_tensor)
+        entropies.append(decision.entropy_tensor)
+        values.append(decision.value_tensor)
+        trajectory_steps.append(
+            _trajectory_step_summary(
+                step_index=len(step_rewards),
+                observation=observation,
+                decision=decision,
+                env_reward=base_reward,
+                input_rate_penalty=rate_penalty,
+                training_reward=step_reward,
+            )
+        )
+        history.append(
+            desired_input_state=decision.desired_input_state,
+            intent_kind=decision.intent.kind,
+        )
+        observation = last_step.observation
+        if last_step.done:
+            break
+
+    attempt_result = _attempt_result_from_last_step(env, last_step)
+    death_local_stats = _apply_death_local_feedback(
+        training_rewards,
+        attempt_result=attempt_result,
+        trajectory_steps=trajectory_steps,
+        config=effective_config,
+    )
+    returns = _discounted_returns(
+        policy.torch,
+        training_rewards,
+        gamma=effective_config.gamma,
+        normalize=False,
+        device=policy.device,
+    )
+    value_tensor = policy.torch.stack(values).view(-1)
+    log_prob_tensor = policy.torch.stack(log_probs)
+    entropy_tensor = policy.torch.stack(entropies)
+    advantages = returns - value_tensor.detach()
+    if effective_config.normalize_advantages and advantages.numel() > 1:
+        advantage_std = advantages.std(unbiased=False)
+        if float(advantage_std.detach().cpu().item()) > 1e-8:
+            advantages = (advantages - advantages.mean()) / advantage_std
+
+    policy_loss_tensor = -(log_prob_tensor * advantages).sum()
+    value_loss_tensor = policy.torch.nn.functional.mse_loss(
+        value_tensor,
+        returns,
+        reduction="sum",
+    )
+    entropy_tensor_sum = entropy_tensor.sum()
+    loss_tensor = (
+        policy_loss_tensor
+        + effective_config.value_loss_weight * value_loss_tensor
+        - effective_config.entropy_bonus * entropy_tensor_sum
+    )
+
+    optimizer.zero_grad(set_to_none=True)
+    loss_tensor.backward()
+    if effective_config.max_grad_norm is not None:
+        policy.torch.nn.utils.clip_grad_norm_(
+            [
+                *policy.shared.parameters(),
+                *policy.actor_head.parameters(),
+                *policy.value_head.parameters(),
+            ],
+            effective_config.max_grad_norm,
+        )
+    optimizer.step()
+
+    return ActorCriticAttemptSummary(
+        attempt_index=attempt_index,
+        step_count=len(step_rewards),
+        total_step_reward=sum(step_rewards),
+        total_training_reward=sum(training_rewards),
+        loss=float(loss_tensor.detach().cpu().item()),
+        policy_loss=float(policy_loss_tensor.detach().cpu().item()),
+        value_loss=float(value_loss_tensor.detach().cpu().item()),
+        entropy=float(entropy_tensor_sum.detach().cpu().item()),
+        mean_value=float(value_tensor.detach().mean().cpu().item()),
+        advantage_stats=_tensor_stats(policy.torch, advantages),
+        action_counts={kind: int(count) for kind, count in action_counts.items()},
+        intent_counts={kind: int(count) for kind, count in intent_counts.items()},
+        death_local_stats=death_local_stats,
+        attempt_result=attempt_result,
+    )
+
+
+def run_actor_critic_training(
+    env: LiveStepEnvLike,
+    policy: TinyLiveActorCriticNetwork,
+    *,
+    config: ActorCriticConfig | None = None,
+    summary_path: str | Path | None = None,
+) -> ActorCriticTrainingSummary:
+    """Run a short actor-critic closed-loop practice session."""
+
+    effective_config = config or ActorCriticConfig()
+    random.seed(effective_config.seed)
+    policy.torch.manual_seed(effective_config.seed)
+    optimizer = policy.make_optimizer(effective_config)
+    attempts = [
+        run_actor_critic_attempt(
+            env,
+            policy,
+            optimizer,
+            attempt_index=attempt_index,
+            config=effective_config,
+        )
+        for attempt_index in range(1, effective_config.attempts + 1)
+    ]
+    summary = ActorCriticTrainingSummary(
+        attempts=attempts,
+        config={
+            **asdict(effective_config),
+            "algorithm": "tiny_actor_critic",
+            "policy": {
+                "input_dim": policy.input_dim,
+                "output_dim": policy.output_dim,
+                "desired_input_states": list(DESIRED_INPUT_STATES),
+                "intent_action_kinds": list(ACTION_KINDS),
+                "hidden_size": policy.config.hidden_size,
+                "device": policy.config.device,
+                "encoder": asdict(policy.config.encoder),
+                "history_length": policy.history_length,
+                "history_feature_dim": live_action_history_feature_dim(
+                    policy.history_length
+                ),
+            },
+        },
+    )
+    if summary_path is not None:
+        _write_json(summary.to_dict(), Path(summary_path))
+    return summary
+
+
+def _attempt_result_from_last_step(
+    env: LiveStepEnvLike,
+    last_step: LiveStepResult | None,
+) -> dict[str, Any]:
+    if (
+        last_step is not None
+        and isinstance(last_step.info.get("attempt_result"), dict)
+    ):
+        return dict(last_step.info["attempt_result"])
+    return env.save_attempt().to_dict()
+
+
+def _trajectory_step_summary(
+    *,
+    step_index: int,
+    observation: LivePracticeObservation,
+    decision: ActorCriticActionDecision,
+    env_reward: float,
+    input_rate_penalty: float,
+    training_reward: float,
+) -> dict[str, Any]:
+    policy_observation = observation.policy_observation
+    return {
+        "step_index": step_index,
+        "latest_tick": observation.latest.tick,
+        "policy_tick": (
+            policy_observation.tick if policy_observation is not None else None
+        ),
+        "policy_visible": policy_observation is not None,
+        "policy_percent": (
+            policy_observation.percent if policy_observation is not None else None
+        ),
+        "policy_y": policy_observation.y if policy_observation is not None else None,
+        "policy_y_vel": (
+            policy_observation.y_vel if policy_observation is not None else None
+        ),
+        "policy_input_down": (
+            policy_observation.input_down
+            if policy_observation is not None
+            else None
+        ),
+        "desired_input_state": decision.desired_input_state,
+        "intent_kind": decision.intent.kind,
+        "value": decision.value,
+        "env_reward": env_reward,
+        "input_rate_penalty": input_rate_penalty,
+        "death_local_penalty": 0.0,
+        "training_reward": training_reward,
+    }
+
+
+def _apply_death_local_feedback(
+    training_rewards: list[float],
+    *,
+    attempt_result: dict[str, Any],
+    trajectory_steps: list[dict[str, Any]],
+    config: ActorCriticConfig,
+) -> dict[str, Any]:
+    death_tick = attempt_result.get("death_tick")
+    cleared = bool(attempt_result.get("cleared", False))
+    stats: dict[str, Any] = {
+        "applied": False,
+        "window_size": config.death_local_window,
+        "affected_step_count": 0,
+        "penalty_total": 0.0,
+        "death_tick": death_tick,
+        "death_percent": attempt_result.get("death_percent"),
+        "reason": None,
+    }
+    if cleared:
+        stats["reason"] = "cleared_attempt"
+        return stats
+    if death_tick is None:
+        stats["reason"] = "no_death_tick"
+        return stats
+    if config.death_local_window == 0 or config.death_local_penalty == 0.0:
+        stats["reason"] = "disabled"
+        return stats
+    if not training_rewards:
+        stats["reason"] = "empty_trajectory"
+        return stats
+
+    affected_count = min(config.death_local_window, len(training_rewards))
+    weight_total = affected_count * (affected_count + 1) / 2.0
+    penalties = [
+        -config.death_local_penalty * ((index + 1) / weight_total)
+        for index in range(affected_count)
+    ]
+    start_index = len(training_rewards) - affected_count
+    for offset, penalty in enumerate(penalties):
+        reward_index = start_index + offset
+        training_rewards[reward_index] += penalty
+        trajectory_steps[reward_index]["death_local_penalty"] = penalty
+        trajectory_steps[reward_index]["training_reward"] += penalty
+
+    recent_steps = trajectory_steps[start_index:]
+    stats.update(
+        {
+            "applied": True,
+            "affected_step_count": affected_count,
+            "penalty_total": sum(penalties),
+            "start_step_index": recent_steps[0]["step_index"],
+            "end_step_index": recent_steps[-1]["step_index"],
+            "latest_tick_range": [
+                recent_steps[0]["latest_tick"],
+                recent_steps[-1]["latest_tick"],
+            ],
+            "policy_tick_range": [
+                recent_steps[0]["policy_tick"],
+                recent_steps[-1]["policy_tick"],
+            ],
+            "desired_input_state_counts": _count_recent(
+                recent_steps,
+                "desired_input_state",
+                DESIRED_INPUT_STATES,
+            ),
+            "intent_counts": _count_recent(recent_steps, "intent_kind", ACTION_KINDS),
+            "average_policy_y": _mean_optional(
+                step["policy_y"] for step in recent_steps
+            ),
+            "average_policy_y_vel": _mean_optional(
+                step["policy_y_vel"] for step in recent_steps
+            ),
+            "recent_steps": _compact_recent_steps(recent_steps[-5:]),
+            "reason": "terminal_death",
+        }
+    )
+    return stats
+
+
+def _count_recent(
+    steps: Sequence[dict[str, Any]],
+    key: str,
+    expected_values: Sequence[str],
+) -> dict[str, int]:
+    counts = {value: 0 for value in expected_values}
+    for step in steps:
+        value = step.get(key)
+        if value in counts:
+            counts[value] += 1
+    return counts
+
+
+def _mean_optional(values: Sequence[float | None]) -> float | None:
+    numeric_values = [float(value) for value in values if value is not None]
+    if not numeric_values:
+        return None
+    return sum(numeric_values) / len(numeric_values)
+
+
+def _compact_recent_steps(steps: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    keys = (
+        "step_index",
+        "latest_tick",
+        "policy_tick",
+        "policy_percent",
+        "policy_y",
+        "policy_y_vel",
+        "policy_input_down",
+        "desired_input_state",
+        "intent_kind",
+        "env_reward",
+        "input_rate_penalty",
+        "death_local_penalty",
+        "training_reward",
+    )
+    return [{key: step.get(key) for key in keys} for step in steps]
+
+
+def _tensor_stats(torch: Any, tensor: Any) -> dict[str, float]:
+    del torch
+    detached = tensor.detach()
+    if detached.numel() == 0:
+        return {"mean": 0.0, "min": 0.0, "max": 0.0, "std": 0.0}
+    return {
+        "mean": float(detached.mean().cpu().item()),
+        "min": float(detached.min().cpu().item()),
+        "max": float(detached.max().cpu().item()),
+        "std": float(detached.std(unbiased=False).cpu().item()),
+    }
 
 
 def _discounted_returns(

@@ -7,6 +7,7 @@ import pytest
 from gd_env import BridgeDiagnostic, BridgeObservation
 from gd_human_model import Event
 from scripts.run_live_rl_practice_geode import (
+    _build_actor_critic_config,
     _build_env_config,
     _build_policy_config,
     _build_reinforce_config,
@@ -61,6 +62,13 @@ def args(**overrides: object) -> argparse.Namespace:
         "death_penalty": 10.0,
         "excessive_input_free_events": 0,
         "excessive_input_penalty": 0.0,
+        "algorithm": "a2c",
+        "value_loss_weight": 0.5,
+        "normalize_advantages": False,
+        "history_length": 4,
+        "death_local_window": 24,
+        "death_local_penalty": 1.0,
+        "input_rate_penalty": 0.0,
     }
     data.update(overrides)
     return argparse.Namespace(**data)
@@ -78,6 +86,7 @@ def test_build_live_rl_configs_keep_smoke_defaults() -> None:
     )
     policy_config = _build_policy_config(namespace)
     reinforce_config = _build_reinforce_config(namespace)
+    actor_critic_config = _build_actor_critic_config(namespace)
 
     assert env_config.max_steps == 600
     assert env_config.post_terminal_delay_seconds == 5.0
@@ -89,6 +98,11 @@ def test_build_live_rl_configs_keep_smoke_defaults() -> None:
     assert reinforce_config.attempts == 1
     assert reinforce_config.max_grad_norm == 1.0
     assert _build_reinforce_config(args(no_grad_clip=True)).max_grad_norm is None
+    assert actor_critic_config.attempts == 1
+    assert actor_critic_config.history_length == 4
+    assert actor_critic_config.death_local_window == 24
+    assert actor_critic_config.max_grad_norm == 1.0
+    assert _build_actor_critic_config(args(no_grad_clip=True)).max_grad_norm is None
 
 
 def test_live_rl_cli_runs_with_fake_client_and_writes_summary(
@@ -133,7 +147,9 @@ def test_live_rl_cli_runs_with_fake_client_and_writes_summary(
     assert fake_client.reset_reasons == ["live_practice_attempt_1"]
     assert stdout["training_summary_json"] == str(output_dir / "training_summary.json")
     assert training_summary["attempt_count"] == 1
+    assert training_summary["config"]["algorithm"] == "tiny_actor_critic"
     assert training_summary["config"]["policy"]["device"] == "cpu"
+    assert training_summary["config"]["policy"]["history_length"] == 4
     assert attempt_summary["metadata"]["executor"] == "geode_live_step"
     assert attempt_summary["cleared"] is True
 

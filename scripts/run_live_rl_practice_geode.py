@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from gd_env import GeometryDashClient
 from gd_rl import (
+    ActorCriticConfig,
     LiveLearnerError,
     LiveObservationEncoderConfig,
     LivePracticeEnv,
@@ -22,7 +23,9 @@ from gd_rl import (
     NeuralPolicyConfig,
     ReinforceConfig,
     RewardConfig,
+    TinyLiveActorCriticNetwork,
     TinyLivePolicyNetwork,
+    run_actor_critic_training,
     run_reinforce_training,
 )
 from gd_rl.live_env import LiveGeodeClientLike
@@ -36,7 +39,7 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a guarded, tiny REINFORCE live-practice smoke through the "
+            "Run a guarded, tiny live neural practice smoke through the "
             "human model and Geode bridge."
         )
     )
@@ -85,9 +88,16 @@ def main(
     parser.add_argument("--encoder-velocity-scale", type=float, default=20.0)
     parser.add_argument("--encoder-rotation-scale", type=float, default=360.0)
 
+    parser.add_argument(
+        "--algorithm",
+        choices=("a2c", "reinforce"),
+        default="a2c",
+        help="tiny live learner to run; defaults to the Phase D actor-critic path",
+    )
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--entropy-bonus", type=float, default=0.0)
+    parser.add_argument("--value-loss-weight", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument(
         "--no-grad-clip",
@@ -95,8 +105,13 @@ def main(
         help="disable gradient clipping for this tiny smoke run",
     )
     parser.add_argument("--normalize-returns", action="store_true")
+    parser.add_argument("--normalize-advantages", action="store_true")
     parser.add_argument("--deterministic-actions", action="store_true")
     parser.add_argument("--learner-seed", type=int, default=0)
+    parser.add_argument("--history-length", type=int, default=4)
+    parser.add_argument("--death-local-window", type=int, default=24)
+    parser.add_argument("--death-local-penalty", type=float, default=1.0)
+    parser.add_argument("--input-rate-penalty", type=float, default=0.0)
 
     parser.add_argument("--progress-scale", type=float, default=1.0)
     parser.add_argument("--best-progress-bonus-scale", type=float, default=0.5)
@@ -114,6 +129,7 @@ def main(
         profile = _load_profile(args.profile, args.profile_json)
         reward_config = _build_reward_config(args)
         reinforce_config = _build_reinforce_config(args)
+        actor_critic_config = _build_actor_critic_config(args)
         policy_config = _build_policy_config(args)
     except (ValueError, LiveLearnerError) as exc:
         parser.error(str(exc))
@@ -131,12 +147,6 @@ def main(
         parser.error(str(exc))
     bridge_client_factory = client_factory or _build_client_factory(args)
 
-    try:
-        policy = TinyLivePolicyNetwork.from_encoder_config(policy_config)
-    except LiveLearnerError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
     summary_path = output_dir / "training_summary.json"
     try:
         with LivePracticeEnv(
@@ -144,12 +154,28 @@ def main(
             human_profile=profile,
             client_factory=bridge_client_factory,
         ) as env:
-            summary = run_reinforce_training(
-                env,
-                policy,
-                config=reinforce_config,
-                summary_path=summary_path,
-            )
+            if args.algorithm == "reinforce":
+                policy = TinyLivePolicyNetwork.from_encoder_config(policy_config)
+                summary = run_reinforce_training(
+                    env,
+                    policy,
+                    config=reinforce_config,
+                    summary_path=summary_path,
+                )
+            else:
+                policy = TinyLiveActorCriticNetwork.from_encoder_config(
+                    policy_config,
+                    history_length=actor_critic_config.history_length,
+                )
+                summary = run_actor_critic_training(
+                    env,
+                    policy,
+                    config=actor_critic_config,
+                    summary_path=summary_path,
+                )
+    except LiveLearnerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except (OSError, TimeoutError, EOFError) as exc:
         print(f"error: bridge communication failed: {exc}", file=sys.stderr)
         return 1
@@ -188,6 +214,10 @@ def _validate_args(
         parser.error("--action-horizon-ticks must be non-negative")
     if args.observation_buffer_size is not None and args.observation_buffer_size <= 0:
         parser.error("--observation-buffer-size must be positive")
+    if args.history_length < 0:
+        parser.error("--history-length must be non-negative")
+    if args.death_local_window < 0:
+        parser.error("--death-local-window must be non-negative")
 
 
 def _build_env_config(
@@ -218,7 +248,12 @@ def _build_env_config(
         metadata={
             "run_id": run_id,
             "executor": "geode_live_step",
-            "learner": "tiny_reinforce",
+            "learner": (
+                "tiny_actor_critic"
+                if args.algorithm == "a2c"
+                else "tiny_reinforce"
+            ),
+            "algorithm": args.algorithm,
             "script": "run_live_rl_practice_geode.py",
         },
     )
@@ -250,6 +285,24 @@ def _build_reinforce_config(args: argparse.Namespace) -> ReinforceConfig:
         normalize_returns=args.normalize_returns,
         deterministic_actions=args.deterministic_actions,
         seed=args.learner_seed,
+    )
+
+
+def _build_actor_critic_config(args: argparse.Namespace) -> ActorCriticConfig:
+    return ActorCriticConfig(
+        attempts=args.attempts,
+        gamma=args.gamma,
+        learning_rate=args.learning_rate,
+        entropy_bonus=args.entropy_bonus,
+        value_loss_weight=args.value_loss_weight,
+        max_grad_norm=None if args.no_grad_clip else args.max_grad_norm,
+        normalize_advantages=args.normalize_advantages,
+        deterministic_actions=args.deterministic_actions,
+        seed=args.learner_seed,
+        history_length=args.history_length,
+        death_local_window=args.death_local_window,
+        death_local_penalty=args.death_local_penalty,
+        input_rate_penalty=args.input_rate_penalty,
     )
 
 

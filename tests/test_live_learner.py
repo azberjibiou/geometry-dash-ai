@@ -6,17 +6,23 @@ import pytest
 from gd_env import BridgeDiagnostic, BridgeObservation
 from gd_human_model import Event, HumanProfile
 from gd_rl import (
+    ActorCriticConfig,
     ButtonStateIntentAdapter,
     IntendedAction,
+    LiveActionHistory,
     LiveObservationEncoderConfig,
     LivePracticeEnv,
     LivePracticeEnvConfig,
     LivePracticeObservation,
     NeuralPolicyConfig,
     ReinforceConfig,
+    TinyLiveActorCriticNetwork,
     TinyLivePolicyNetwork,
+    actor_critic_feature_dim,
+    encode_actor_critic_observation,
     encode_live_observation,
     live_observation_feature_dim,
+    run_actor_critic_training,
     run_reinforce_training,
 )
 
@@ -57,17 +63,40 @@ def test_button_state_adapter_uses_intended_state_not_executed_state() -> None:
         )
     )
 
-    assert adapter.intent_for_desired_state("down", tick=100) == IntendedAction.press(
+    assert adapter.intent_for_desired_state("hold", tick=100) == IntendedAction.press(
         100
     )
-    assert adapter.intent_for_desired_state("down", tick=101).kind == "no_op"
-    assert adapter.intent_for_desired_state("up", tick=102) == IntendedAction.release(
+    assert adapter.intent_for_desired_state("hold", tick=101).kind == "no_op"
+    assert adapter.intent_for_desired_state("idle", tick=102) == IntendedAction.release(
         102
     )
-    assert adapter.intent_for_desired_state("up", tick=103).kind == "no_op"
+    assert adapter.intent_for_desired_state("idle", tick=103).kind == "no_op"
 
 
-def test_reinforce_training_updates_down_probability_and_writes_summary(
+def test_actor_critic_encoder_appends_recent_intended_history() -> None:
+    observation = LivePracticeObservation(
+        latest=_observation(20, percent=80.0, x=200.0),
+        policy_observation=_observation(10, percent=25.0, x=50.0),
+    )
+    history = LiveActionHistory(length=2)
+    history.append(desired_input_state="hold", intent_kind="press")
+
+    features = encode_actor_critic_observation(
+        observation,
+        history=history,
+        history_length=2,
+        config=LiveObservationEncoderConfig(max_tick=100, x_scale=100.0),
+    )
+
+    assert len(features) == actor_critic_feature_dim(2)
+    assert features[: live_observation_feature_dim()] == encode_live_observation(
+        observation,
+        config=LiveObservationEncoderConfig(max_tick=100, x_scale=100.0),
+    )
+    assert features[-8:] == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+
+
+def test_reinforce_training_updates_hold_probability_and_writes_summary(
     tmp_path: Path,
 ) -> None:
     torch = pytest.importorskip("torch")
@@ -86,12 +115,12 @@ def test_reinforce_training_updates_down_probability_and_writes_summary(
     policy = TinyLivePolicyNetwork.from_encoder_config(
         NeuralPolicyConfig(hidden_size=4, seed=7)
     )
-    _bias_policy_toward_down(torch, policy)
+    _bias_policy_toward_hold(torch, policy)
     observation = LivePracticeObservation(
         latest=_observation(0, percent=0.0),
         policy_observation=_observation(0, percent=0.0),
     )
-    before_down_probability = policy.action_probabilities(observation)[1]
+    before_hold_probability = policy.action_probabilities(observation)[1]
 
     with env:
         summary = run_reinforce_training(
@@ -106,18 +135,124 @@ def test_reinforce_training_updates_down_probability_and_writes_summary(
             summary_path=tmp_path / "learner_summary.json",
         )
 
-    after_down_probability = policy.action_probabilities(observation)[1]
+    after_hold_probability = policy.action_probabilities(observation)[1]
     written_summary = json.loads(
         (tmp_path / "learner_summary.json").read_text(encoding="utf-8")
     )
 
     assert fake_client.sent_events == [Event(0, "press")]
-    assert after_down_probability > before_down_probability
+    assert after_hold_probability > before_hold_probability
     assert summary.attempt_count == 1
-    assert summary.attempts[0].action_counts["down"] == 1
+    assert summary.attempts[0].action_counts["hold"] == 1
     assert summary.attempts[0].intent_counts["press"] == 1
     assert summary.attempts[0].attempt_result["cleared"] is True
     assert written_summary["attempt_count"] == 1
+
+
+def test_actor_critic_training_updates_hold_probability_and_writes_summary(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    fake_client = OneStepPressRewardClient()
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="one_step_press_reward",
+            output_dir=tmp_path / "attempts",
+            max_steps=1,
+            action_horizon_ticks=0,
+            success_percent=100.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+    policy = TinyLiveActorCriticNetwork.from_encoder_config(
+        NeuralPolicyConfig(hidden_size=4, seed=9),
+        history_length=2,
+    )
+    _bias_actor_critic_toward_hold(torch, policy)
+    observation = LivePracticeObservation(
+        latest=_observation(0, percent=0.0),
+        policy_observation=_observation(0, percent=0.0),
+    )
+    before_hold_probability = policy.action_probabilities(observation)[1]
+
+    with env:
+        summary = run_actor_critic_training(
+            env,
+            policy,
+            config=ActorCriticConfig(
+                attempts=1,
+                learning_rate=0.05,
+                deterministic_actions=True,
+                history_length=2,
+                death_local_penalty=0.0,
+            ),
+            summary_path=tmp_path / "a2c_summary.json",
+        )
+
+    after_hold_probability = policy.action_probabilities(observation)[1]
+    written_summary = json.loads(
+        (tmp_path / "a2c_summary.json").read_text(encoding="utf-8")
+    )
+
+    assert fake_client.sent_events == [Event(0, "press")]
+    assert after_hold_probability > before_hold_probability
+    assert summary.attempt_count == 1
+    assert summary.attempts[0].action_counts["hold"] == 1
+    assert summary.attempts[0].intent_counts["press"] == 1
+    assert summary.attempts[0].value_loss >= 0.0
+    assert summary.attempts[0].attempt_result["cleared"] is True
+    assert written_summary["config"]["algorithm"] == "tiny_actor_critic"
+    assert written_summary["config"]["policy"]["history_length"] == 2
+
+
+def test_actor_critic_death_local_feedback_weights_recent_window(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    fake_client = OneStepDeathClient()
+    env = LivePracticeEnv(
+        config=LivePracticeEnvConfig(
+            level_id="one_step_death",
+            output_dir=tmp_path / "attempts",
+            max_steps=1,
+            action_horizon_ticks=0,
+            success_percent=100.0,
+        ),
+        human_profile=_profile(),
+        client_factory=lambda: fake_client,
+    )
+    policy = TinyLiveActorCriticNetwork.from_encoder_config(
+        NeuralPolicyConfig(hidden_size=4, seed=11),
+        history_length=1,
+    )
+    _bias_actor_critic_toward_idle(torch, policy)
+
+    with env:
+        summary = run_actor_critic_training(
+            env,
+            policy,
+            config=ActorCriticConfig(
+                attempts=1,
+                learning_rate=0.01,
+                deterministic_actions=True,
+                history_length=1,
+                death_local_window=4,
+                death_local_penalty=2.0,
+            ),
+        )
+
+    attempt = summary.attempts[0]
+    stats = attempt.death_local_stats
+
+    assert stats["applied"] is True
+    assert stats["affected_step_count"] == 1
+    assert stats["penalty_total"] == pytest.approx(-2.0)
+    assert stats["intent_counts"]["no_op"] == 1
+    assert stats["recent_steps"][0]["death_local_penalty"] == pytest.approx(-2.0)
+    assert attempt.total_training_reward == pytest.approx(
+        attempt.total_step_reward - 2.0
+    )
 
 
 class OneStepPressRewardClient:
@@ -165,13 +300,46 @@ class OneStepPressRewardClient:
         self.sent_events.append(event)
 
 
-def _bias_policy_toward_down(torch, policy: TinyLivePolicyNetwork) -> None:  # type: ignore[no-untyped-def]
+class OneStepDeathClient(OneStepPressRewardClient):
+    def receive_observation(self) -> BridgeObservation:
+        return _observation(
+            1,
+            percent=0.0,
+            dead=True,
+            input_down=any(event.kind == "press" for event in self.sent_events),
+        )
+
+
+def _bias_policy_toward_hold(torch, policy: TinyLivePolicyNetwork) -> None:  # type: ignore[no-untyped-def]
     with torch.no_grad():
         for parameter in policy.model.parameters():
             parameter.zero_()
         policy.model[2].bias.copy_(
             torch.tensor([0.0, 1.0], dtype=torch.float32)
         )
+
+
+def _bias_actor_critic_toward_hold(torch, policy: TinyLiveActorCriticNetwork) -> None:  # type: ignore[no-untyped-def]
+    _zero_actor_critic(torch, policy)
+    with torch.no_grad():
+        policy.actor_head.bias.copy_(
+            torch.tensor([0.0, 1.0], dtype=torch.float32)
+        )
+
+
+def _bias_actor_critic_toward_idle(torch, policy: TinyLiveActorCriticNetwork) -> None:  # type: ignore[no-untyped-def]
+    _zero_actor_critic(torch, policy)
+    with torch.no_grad():
+        policy.actor_head.bias.copy_(
+            torch.tensor([1.0, 0.0], dtype=torch.float32)
+        )
+
+
+def _zero_actor_critic(torch, policy: TinyLiveActorCriticNetwork) -> None:  # type: ignore[no-untyped-def]
+    with torch.no_grad():
+        for module in (policy.shared, policy.actor_head, policy.value_head):
+            for parameter in module.parameters():
+                parameter.zero_()
 
 
 def _profile() -> HumanProfile:
