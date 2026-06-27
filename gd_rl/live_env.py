@@ -778,6 +778,7 @@ class LivePracticeEnv:
                 "source": "live_step_env",
                 "purpose": "clear_stale_queued_macro",
             },
+            max_messages=2400,
         )
         self._diagnostics.append(
             BridgeDiagnostic(
